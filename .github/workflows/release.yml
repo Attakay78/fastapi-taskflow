@@ -1,0 +1,175 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # ── 1. Check whether this push actually bumped the version ──────────────────
+  check-version:
+    name: Check version bump
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      tag: ${{ steps.get-version.outputs.tag }}
+      should-release: ${{ steps.compare.outputs.should-release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from pyproject.toml
+        id: get-version
+        run: |
+          VERSION=$(python - <<'EOF'
+          import tomllib
+          with open("pyproject.toml", "rb") as f:
+              print(tomllib.load(f)["project"]["version"])
+          EOF
+          )
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION"    >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag already exists
+        id: compare
+        run: |
+          TAG="v${{ steps.get-version.outputs.version }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists — skipping release."
+            echo "should-release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New version $TAG detected — will release."
+            echo "should-release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── 2. CI gate ─────────────────────────────────────────────────────────────
+  ci-gate:
+    name: CI gate
+    needs: check-version
+    if: needs.check-version.outputs.should-release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv pip install --system -e ".[redis,dev]" ruff mypy
+
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Type check
+        run: mypy fastapi_taskflow/
+
+      - name: Tests
+        run: pytest --tb=short -q
+
+  # ── 3. Build distribution ──────────────────────────────────────────────────
+  build:
+    name: Build distribution
+    needs: [check-version, ci-gate]
+    if: needs.check-version.outputs.should-release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Build wheel & sdist
+        run: |
+          uv pip install --system build
+          python -m build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 1
+
+  # ── 4. Publish to PyPI (OIDC trusted publishing) ──────────────────────────
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [check-version, build]
+    if: needs.check-version.outputs.should-release == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  # ── 5. Create GitHub tag & release ────────────────────────────────────────
+  github-release:
+    name: Create GitHub Release
+    needs: [check-version, publish-pypi]
+    if: needs.check-version.outputs.should-release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          if [ -f docs/changelog.md ]; then
+            NOTES=$(python - <<EOF
+          import re
+          text = open("docs/changelog.md").read()
+          pattern = rf"(?:^|\n)## \[?{re.escape("$VERSION")}\]?[^\n]*\n(.*?)(?=\n## |\Z)"
+          m = re.search(pattern, text, re.DOTALL)
+          print(m.group(1).strip() if m else "")
+          EOF
+            )
+          else
+            NOTES=""
+          fi
+          if [ -z "$NOTES" ]; then
+            NOTES="Release $VERSION — see commit history for details."
+          fi
+          echo "$NOTES" > release_notes.txt
+
+      - name: Create tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ needs.check-version.outputs.tag }}"
+          VERSION="${{ needs.check-version.outputs.version }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --yes
+          fi
+          gh release create "$TAG" dist/* \
+            --title "fastapi-taskflow $VERSION" \
+            --notes-file release_notes.txt
