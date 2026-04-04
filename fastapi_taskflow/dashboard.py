@@ -213,7 +213,7 @@ _DASHBOARD_TEMPLATE = """\
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Task Dashboard · fastapi-taskflow</title>
+  <title>Task Dashboard · FastAPI-TaskFlow</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'><rect width='200' height='200' rx='40' ry='40' fill='%23111111'/><polyline points='20,100 55,100 80,145 120,55 145,100 180,100' fill='none' stroke='white' stroke-width='18' stroke-linecap='round' stroke-linejoin='round'/></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

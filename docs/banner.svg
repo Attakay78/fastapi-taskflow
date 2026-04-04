@@ -14,5 +14,5 @@
   />
 
   <!-- All white text -->
-  <text x="112" y="62" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="42" font-weight="700" letter-spacing="-1" fill="#ffffff">fastapi-taskflow</text>
+  <text x="112" y="62" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="42" font-weight="700" letter-spacing="-1" fill="#ffffff">FastAPI-TaskFlow</text>
 </svg>

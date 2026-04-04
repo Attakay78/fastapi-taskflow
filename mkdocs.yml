@@ -1,4 +1,4 @@
-site_name: fastapi-taskflow
+site_name: FastAPI-TaskFlow
 site_description: Retries, control, and visibility without workers or brokers
 site_url: https://attakay78.github.io/fastapi-taskflow/
 repo_url: https://github.com/Attakay78/fastapi-taskflow
