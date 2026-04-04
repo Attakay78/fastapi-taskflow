@@ -10,8 +10,8 @@ if TYPE_CHECKING:
     from .manager import TaskManager
 
 _AuthParam = Union[
-    tuple,           # (username, password)
-    list,            # [(username, password), ...]
+    tuple,  # (username, password)
+    list,  # [(username, password), ...]
     "TaskAuthBackend",
     None,
 ]
@@ -63,6 +63,7 @@ class TaskAdmin:
             task_manager.install(app)
 
         from .auth import resolve_backend
+
         backend = resolve_backend(auth)
 
         resolved_secret: str | None = None
@@ -75,6 +76,7 @@ class TaskAdmin:
         if backend is not None:
             assert resolved_secret is not None
             from .auth import create_auth_router
+
             app.include_router(
                 create_auth_router(backend, resolved_secret, token_expiry, prefix=path)
             )

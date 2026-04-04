@@ -25,6 +25,7 @@ def create_router(
     dependencies = []
     if secret_key is not None:
         from .auth import make_api_guard
+
         dependencies.append(make_api_guard(secret_key))
 
     router = APIRouter(prefix=prefix, tags=["tasks"], dependencies=dependencies)

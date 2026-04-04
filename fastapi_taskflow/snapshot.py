@@ -71,6 +71,7 @@ class SnapshotScheduler:
             if db_path is None:
                 raise ValueError("Provide either 'backend' or 'db_path'.")
             from .backends.sqlite import SqliteBackend
+
             backend = SqliteBackend(db_path)
 
         self._task_manager = task_manager

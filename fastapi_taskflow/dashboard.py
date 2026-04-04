@@ -34,7 +34,7 @@ _STATUS_COLOR = {
     "pending": ("#f3f4f6", "#6b7280"),
     "running": ("#eff6ff", "#2563eb"),
     "success": ("#f0fdf4", "#16a34a"),
-    "failed":  ("#fef2f2", "#dc2626"),
+    "failed": ("#fef2f2", "#dc2626"),
 }
 
 
@@ -42,7 +42,7 @@ def _badge(status: str) -> str:
     bg, fg = _STATUS_COLOR.get(status, ("#f3f4f6", "#6b7280"))
     return (
         f'<span style="background:{bg};color:{fg};padding:2px 8px;'
-        f'border-radius:4px;font-size:0.72rem;font-weight:600;'
+        f"border-radius:4px;font-size:0.72rem;font-weight:600;"
         f'letter-spacing:.02em">{html.escape(status)}</span>'
     )
 
@@ -58,25 +58,25 @@ def _metric_card(label: str, value: str, accent: str) -> str:
 
 
 def _render_metrics(task_manager: "TaskManager") -> str:
-    tasks   = task_manager.store.list()
-    total   = len(tasks)
+    tasks = task_manager.store.list()
+    total = len(tasks)
     success = sum(1 for t in tasks if t.status.value == "success")
-    failed  = sum(1 for t in tasks if t.status.value == "failed")
+    failed = sum(1 for t in tasks if t.status.value == "failed")
     running = sum(1 for t in tasks if t.status.value == "running")
     pending = sum(1 for t in tasks if t.status.value == "pending")
-    rate    = f"{success / total * 100:.1f}%" if total else "—"
-    durs    = [t.duration for t in tasks if t.duration is not None]
-    avg     = f"{sum(durs) / len(durs) * 1000:.0f} ms" if durs else "—"
+    rate = f"{success / total * 100:.1f}%" if total else "—"
+    durs = [t.duration for t in tasks if t.duration is not None]
+    avg = f"{sum(durs) / len(durs) * 1000:.0f} ms" if durs else "—"
 
     return (
         '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px">'
-        + _metric_card("Total",        str(total),   "#6366f1")
-        + _metric_card("Pending",      str(pending), "#9ca3af")
-        + _metric_card("Running",      str(running), "#7c3aed")
-        + _metric_card("Success",      str(success), "#16a34a")
-        + _metric_card("Failed",       str(failed),  "#dc2626")
-        + _metric_card("Success rate", rate,         "#f59e0b")
-        + _metric_card("Avg duration", avg,          "#8b5cf6")
+        + _metric_card("Total", str(total), "#6366f1")
+        + _metric_card("Pending", str(pending), "#9ca3af")
+        + _metric_card("Running", str(running), "#7c3aed")
+        + _metric_card("Success", str(success), "#16a34a")
+        + _metric_card("Failed", str(failed), "#dc2626")
+        + _metric_card("Success rate", rate, "#f59e0b")
+        + _metric_card("Avg duration", avg, "#8b5cf6")
         + "</div>"
     )
 
@@ -108,7 +108,7 @@ def _render_task_rows(task_manager: "TaskManager") -> str:
         rows.append(
             '<tr style="border-bottom:1px solid #f3f4f6">'
             f'<td style="padding:10px 14px;font-family:monospace;font-size:0.75rem;color:#aaa">'
-            f'{html.escape(t.task_id[:8])}…</td>'
+            f"{html.escape(t.task_id[:8])}…</td>"
             f'<td style="padding:10px 14px;font-weight:500;color:#111">{html.escape(t.func_name)}</td>'
             f'<td style="padding:10px 14px">{_badge(t.status.value)}</td>'
             f'<td style="padding:10px 14px;color:#6b7280;text-align:right">{duration}</td>'
@@ -139,21 +139,21 @@ def _build_sse_state(task_manager: "TaskManager", include_args: bool = False) ->
     ``kwargs`` (serialised with ``repr()`` so arbitrary types are safe).
     Newlines are kept out of the data line so the SSE framing is unambiguous.
     """
-    tasks   = task_manager.store.list()
-    total   = len(tasks)
+    tasks = task_manager.store.list()
+    total = len(tasks)
     success = sum(1 for t in tasks if t.status.value == "success")
-    failed  = sum(1 for t in tasks if t.status.value == "failed")
+    failed = sum(1 for t in tasks if t.status.value == "failed")
     running = sum(1 for t in tasks if t.status.value == "running")
     pending = sum(1 for t in tasks if t.status.value == "pending")
-    durs    = [t.duration for t in tasks if t.duration is not None]
+    durs = [t.duration for t in tasks if t.duration is not None]
 
     metrics = {
-        "total":           total,
-        "pending":         pending,
-        "running":         running,
-        "success":         success,
-        "failed":          failed,
-        "success_rate":    round(success / total * 100, 1) if total else None,
+        "total": total,
+        "pending": pending,
+        "running": running,
+        "success": success,
+        "failed": failed,
+        "success_rate": round(success / total * 100, 1) if total else None,
         "avg_duration_ms": round(sum(durs) / len(durs) * 1000) if durs else None,
     }
 
@@ -161,7 +161,7 @@ def _build_sse_state(task_manager: "TaskManager", include_args: bool = False) ->
     for t in tasks:
         d = t.to_dict()
         if include_args:
-            d["args"]   = [repr(a) for a in t.args]
+            d["args"] = [repr(a) for a in t.args]
             d["kwargs"] = {k: repr(v) for k, v in t.kwargs.items()}
         task_dicts.append(d)
 
@@ -924,12 +924,10 @@ def _dashboard_page(
 ) -> str:
     stream_url = f"{base_path}/dashboard/stream"
     logout_btn = (
-        f'<a href="{logout_url}" class="logout-btn">Sign out</a>'
-        if logout_url else ""
+        f'<a href="{logout_url}" class="logout-btn">Sign out</a>' if logout_url else ""
     )
     return (
-        _DASHBOARD_TEMPLATE
-        .replace("__STREAM_URL__", stream_url)
+        _DASHBOARD_TEMPLATE.replace("__STREAM_URL__", stream_url)
         .replace("__SHOW_ARGS__", "true" if show_args else "false")
         .replace("__LOGOUT_BUTTON__", logout_btn)
     )
@@ -961,6 +959,7 @@ def create_dashboard_router(
         if secret_key is None:
             return True
         from .auth import verify_token, COOKIE_NAME
+
         return verify_token(secret_key, request.cookies.get(COOKIE_NAME, ""))
 
     @router.get("", response_class=HTMLResponse)
@@ -987,6 +986,7 @@ def create_dashboard_router(
     def metrics_fragment(request: Request) -> HTMLResponse:
         if not _check_cookie(request):
             from fastapi import HTTPException
+
             raise HTTPException(status_code=401, detail="Unauthorized")
         return HTMLResponse(_render_metrics(task_manager))
 
@@ -994,6 +994,7 @@ def create_dashboard_router(
     def tasks_fragment(request: Request) -> HTMLResponse:
         if not _check_cookie(request):
             from fastapi import HTTPException
+
             raise HTTPException(status_code=401, detail="Unauthorized")
         return HTMLResponse(_render_task_rows(task_manager))
 

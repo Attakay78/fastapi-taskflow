@@ -55,6 +55,7 @@ class TaskManager:
 
             if snapshot_backend is None:
                 from .backends.sqlite import SqliteBackend
+
                 snapshot_backend = SqliteBackend(snapshot_db)  # type: ignore[arg-type]
 
             self._scheduler = SnapshotScheduler(
@@ -116,7 +117,9 @@ class TaskManager:
         return ManagedBackgroundTasks(self, background_tasks)
 
     @property
-    def background_tasks(self) -> Callable[["BackgroundTasks"], "ManagedBackgroundTasks"]:
+    def background_tasks(
+        self,
+    ) -> Callable[["BackgroundTasks"], "ManagedBackgroundTasks"]:
         """
         Alias for :meth:`get_tasks` that enables the natural-feeling pattern::
 
@@ -166,9 +169,9 @@ class TaskManager:
 
         class _BoundManaged(ManagedBackgroundTasks):
             """Zero-arg subclass so FastAPI can call BackgroundTasks() at line 721."""
+
             def __init__(self) -> None:
                 super().__init__(_tm)
 
         self._installed_on = app
         _fdu.BackgroundTasks = _BoundManaged  # type: ignore[misc, assignment]
-

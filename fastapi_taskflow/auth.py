@@ -112,13 +112,9 @@ def _b64url_decode(s: str) -> bytes:
 
 def create_token(secret_key: str, expiry: int) -> str:
     header = _b64url_encode(b'{"alg":"HS256","typ":"JWT"}')
-    body = _b64url_encode(
-        json.dumps({"exp": int(time.time()) + expiry}).encode()
-    )
+    body = _b64url_encode(json.dumps({"exp": int(time.time()) + expiry}).encode())
     signing_input = f"{header}.{body}"
-    sig = hmac.new(
-        secret_key.encode(), signing_input.encode(), hashlib.sha256
-    ).digest()
+    sig = hmac.new(secret_key.encode(), signing_input.encode(), hashlib.sha256).digest()
     return f"{signing_input}.{_b64url_encode(sig)}"
 
 
@@ -163,9 +159,7 @@ def make_api_guard(secret_key: str):
 
 
 def _login_html(action: str, error: str = "") -> str:
-    error_block = (
-        f'<div class="error">{error}</div>' if error else ""
-    )
+    error_block = f'<div class="error">{error}</div>' if error else ""
     return f"""\
 <!DOCTYPE html>
 <html lang="en">

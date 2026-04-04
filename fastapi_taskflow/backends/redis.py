@@ -31,7 +31,7 @@ from .base import SnapshotBackend
 if TYPE_CHECKING:
     from ..models import TaskRecord
 
-_INDEX_SUFFIX   = ":_index"
+_INDEX_SUFFIX = ":_index"
 _PENDING_SUFFIX = ":_pending"
 
 
@@ -82,7 +82,7 @@ class RedisBackend(SnapshotBackend):
             except ImportError as exc:
                 raise ImportError(
                     "RedisBackend requires the 'redis' package. "
-                    "Install it with: pip install \"redis[asyncio]\""
+                    'Install it with: pip install "redis[asyncio]"'
                 ) from exc
             self._client = aioredis.from_url(self._url, **self._client_kwargs)
         return self._client
@@ -103,16 +103,16 @@ class RedisBackend(SnapshotBackend):
     def _record_to_mapping(record: "TaskRecord") -> dict[str, str]:
         """Serialise a TaskRecord to a flat string mapping (Redis hash fields)."""
         return {
-            "task_id":    record.task_id,
-            "func_name":  record.func_name,
-            "status":     record.status.value,
+            "task_id": record.task_id,
+            "func_name": record.func_name,
+            "status": record.status.value,
             "created_at": record.created_at.isoformat(),
             "start_time": record.start_time.isoformat() if record.start_time else "",
-            "end_time":   record.end_time.isoformat()   if record.end_time   else "",
-            "duration":   str(record.duration) if record.duration is not None else "",
+            "end_time": record.end_time.isoformat() if record.end_time else "",
+            "duration": str(record.duration) if record.duration is not None else "",
             "retries_used": str(record.retries_used),
-            "error":      record.error or "",
-            "args_json":  json.dumps(list(record.args), default=repr),
+            "error": record.error or "",
+            "args_json": json.dumps(list(record.args), default=repr),
             "kwargs_json": json.dumps(record.kwargs, default=repr),
         }
 
@@ -141,8 +141,12 @@ class RedisBackend(SnapshotBackend):
             ),
             retries_used=int(mapping.get("retries_used", 0) or 0),
             error=mapping.get("error") or None,
-            args=tuple(json.loads(mapping["args_json"])) if mapping.get("args_json") else (),
-            kwargs=json.loads(mapping["kwargs_json"]) if mapping.get("kwargs_json") else {},
+            args=tuple(json.loads(mapping["args_json"]))
+            if mapping.get("args_json")
+            else (),
+            kwargs=json.loads(mapping["kwargs_json"])
+            if mapping.get("kwargs_json")
+            else {},
         )
 
     # ------------------------------------------------------------------
@@ -175,7 +179,9 @@ class RedisBackend(SnapshotBackend):
 
         pipe = client.pipeline()
         for task_id in task_ids:
-            pipe.hgetall(self._key(task_id.decode() if isinstance(task_id, bytes) else task_id))
+            pipe.hgetall(
+                self._key(task_id.decode() if isinstance(task_id, bytes) else task_id)
+            )
 
         results = await pipe.execute()
         records: list[TaskRecord] = []
@@ -184,7 +190,9 @@ class RedisBackend(SnapshotBackend):
                 continue
             # redis-py returns bytes keys/values; decode them
             mapping = {
-                (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
+                (k.decode() if isinstance(k, bytes) else k): (
+                    v.decode() if isinstance(v, bytes) else v
+                )
                 for k, v in raw.items()
             }
             if mapping.get("task_id"):
@@ -199,17 +207,19 @@ class RedisBackend(SnapshotBackend):
         # Clear the existing pending index and all its hashes first
         existing_ids = await client.smembers(self._pending_index_key())
         for tid in existing_ids:
-            pipe.delete(self._pending_key(tid.decode() if isinstance(tid, bytes) else tid))
+            pipe.delete(
+                self._pending_key(tid.decode() if isinstance(tid, bytes) else tid)
+            )
         pipe.delete(self._pending_index_key())
 
         for record in records:
             key = self._pending_key(record.task_id)
             mapping = {
-                "task_id":     record.task_id,
-                "func_name":   record.func_name,
-                "created_at":  record.created_at.isoformat(),
+                "task_id": record.task_id,
+                "func_name": record.func_name,
+                "created_at": record.created_at.isoformat(),
                 "retries_used": str(record.retries_used),
-                "args_json":   json.dumps(list(record.args), default=repr),
+                "args_json": json.dumps(list(record.args), default=repr),
                 "kwargs_json": json.dumps(record.kwargs, default=repr),
             }
             pipe.hset(key, mapping=mapping)
@@ -228,7 +238,9 @@ class RedisBackend(SnapshotBackend):
 
         pipe = client.pipeline()
         for tid in task_ids:
-            pipe.hgetall(self._pending_key(tid.decode() if isinstance(tid, bytes) else tid))
+            pipe.hgetall(
+                self._pending_key(tid.decode() if isinstance(tid, bytes) else tid)
+            )
 
         results = await pipe.execute()
         records: list[TaskRecord] = []
@@ -236,24 +248,30 @@ class RedisBackend(SnapshotBackend):
             if not raw:
                 continue
             d = {
-                (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
+                (k.decode() if isinstance(k, bytes) else k): (
+                    v.decode() if isinstance(v, bytes) else v
+                )
                 for k, v in raw.items()
             }
             if not d.get("task_id"):
                 continue
-            records.append(TaskRecord(
-                task_id=d["task_id"],
-                func_name=d["func_name"],
-                status=TaskStatus.PENDING,
-                created_at=(
-                    datetime.fromisoformat(d["created_at"])
-                    if d.get("created_at")
-                    else datetime.utcnow()
-                ),
-                retries_used=int(d.get("retries_used", 0) or 0),
-                args=tuple(json.loads(d["args_json"])) if d.get("args_json") else (),
-                kwargs=json.loads(d["kwargs_json"]) if d.get("kwargs_json") else {},
-            ))
+            records.append(
+                TaskRecord(
+                    task_id=d["task_id"],
+                    func_name=d["func_name"],
+                    status=TaskStatus.PENDING,
+                    created_at=(
+                        datetime.fromisoformat(d["created_at"])
+                        if d.get("created_at")
+                        else datetime.utcnow()
+                    ),
+                    retries_used=int(d.get("retries_used", 0) or 0),
+                    args=tuple(json.loads(d["args_json"]))
+                    if d.get("args_json")
+                    else (),
+                    kwargs=json.loads(d["kwargs_json"]) if d.get("kwargs_json") else {},
+                )
+            )
         return records
 
     async def clear_pending(self) -> None:
@@ -261,7 +279,9 @@ class RedisBackend(SnapshotBackend):
         task_ids = await client.smembers(self._pending_index_key())
         pipe = client.pipeline()
         for tid in task_ids:
-            pipe.delete(self._pending_key(tid.decode() if isinstance(tid, bytes) else tid))
+            pipe.delete(
+                self._pending_key(tid.decode() if isinstance(tid, bytes) else tid)
+            )
         pipe.delete(self._pending_index_key())
         await pipe.execute()
 

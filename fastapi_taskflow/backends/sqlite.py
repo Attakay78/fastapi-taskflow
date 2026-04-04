@@ -165,7 +165,9 @@ class SqliteBackend(SnapshotBackend):
                         else datetime.utcnow()
                     ),
                     retries_used=d["retries_used"] or 0,
-                    args=tuple(json.loads(d["args_json"])) if d.get("args_json") else (),
+                    args=tuple(json.loads(d["args_json"]))
+                    if d.get("args_json")
+                    else (),
                     kwargs=json.loads(d["kwargs_json"]) if d.get("kwargs_json") else {},
                 )
             )
@@ -201,13 +203,13 @@ class SqliteBackend(SnapshotBackend):
                         else None
                     ),
                     end_time=(
-                        datetime.fromisoformat(d["end_time"])
-                        if d["end_time"]
-                        else None
+                        datetime.fromisoformat(d["end_time"]) if d["end_time"] else None
                     ),
                     retries_used=d["retries_used"] or 0,
                     error=d["error"],
-                    args=tuple(json.loads(d["args_json"])) if d.get("args_json") else (),
+                    args=tuple(json.loads(d["args_json"]))
+                    if d.get("args_json")
+                    else (),
                     kwargs=json.loads(d["kwargs_json"]) if d.get("kwargs_json") else {},
                 )
             )

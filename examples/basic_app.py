@@ -55,5 +55,7 @@ def signup(email: str, background_tasks: BackgroundTasks):
 # native BackgroundTasks without the patch.
 @app.post("/webhook", summary="Queue a webhook processing task")
 def webhook(background_tasks: ManagedBackgroundTasks):
-    task_id = background_tasks.add_task(process_webhook, {"event": "order.created", "id": 42})
+    task_id = background_tasks.add_task(
+        process_webhook, {"event": "order.created", "id": 42}
+    )
     return {"queued": True, "task_id": task_id}
