@@ -1,13 +1,12 @@
 site_name: fastapi-taskflow
 site_description: Retries, control, and visibility without workers or brokers
-site_url: https://fastapi-taskflow.dev
+site_url: https://attakay78.github.io/fastapi-taskflow/
 repo_url: https://github.com/Attakay78/fastapi-taskflow
 repo_name: fastapi-taskflow
 edit_uri: ""
 
 theme:
   name: material
-  custom_dir: docs/overrides
   logo: logo.svg
   favicon: logo.svg
   font:
