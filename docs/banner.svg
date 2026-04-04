@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 100" width="560" height="100">
+  <!-- Logo icon box — black with white icon, same as logo.svg -->
+  <!-- 80x80 box at (16,10), scale=0.4 from 200x200 viewBox, rx=16 -->
+  <rect x="16" y="10" width="80" height="80" rx="16" ry="16" fill="#000000"/>
+
+  <!-- Activity polyline scaled to 80x80 box: scale=0.4, offset x+16 y+10 -->
+  <polyline
+    points="24,50 38,50 48,68 64,32 74,50 88,50"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="7"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <!-- All white text -->
+  <text x="112" y="62" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="42" font-weight="700" letter-spacing="-1" fill="#ffffff">fastapi-taskflow</text>
+</svg>

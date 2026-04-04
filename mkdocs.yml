@@ -1,0 +1,81 @@
+site_name: fastapi-taskflow
+site_description: Retries, control, and visibility without workers or brokers
+site_url: https://fastapi-taskflow.dev
+repo_url: https://github.com/Attakay78/fastapi-taskflow
+repo_name: fastapi-taskflow
+edit_uri: ""
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  logo: logo.svg
+  favicon: logo.svg
+  font:
+    text: Geist
+    code: Geist Mono
+  palette:
+    - scheme: default
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - toc.follow
+    - content.code.copy
+    - content.code.annotate
+
+extra_css:
+  - stylesheets/extra.css
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quickstart.md
+  - Guide:
+    - Defining Tasks: guide/defining-tasks.md
+    - Injection Patterns: guide/injection.md
+    - Persistence: guide/persistence.md
+    - Pending Requeue: guide/requeue.md
+    - Custom Backends: guide/backends.md
+    - Dashboard: guide/dashboard.md
+    - Authentication: guide/authentication.md
+  - API Reference:
+    - TaskManager: api/task-manager.md
+    - TaskAdmin: api/task-admin.md
+    - ManagedBackgroundTasks: api/managed-background-tasks.md
+    - Models: api/models.md
+    - Backends: api/backends.md
+  - Changelog: changelog.md
