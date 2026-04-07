@@ -66,6 +66,10 @@
   color: var(--md-typeset-color);
 }
 
+.hero-accent {
+  color: #009688;
+}
+
 .hero p.sub {
   font-size: 1rem;
   color: var(--tf-muted);
@@ -166,8 +170,8 @@
 .problem-section::before {
   background: linear-gradient(to bottom,
     transparent,
-    rgba(99, 102, 241, 0.05) 20%,
-    rgba(99, 102, 241, 0.05) 80%,
+    rgba(0, 150, 136, 0.06) 20%,
+    rgba(0, 150, 136, 0.06) 80%,
     transparent
   );
 }
@@ -331,7 +335,7 @@
 }
 
 .dashboard-preview {
-  border-radius: 12px;
+  border-radius: 0 8px 8px 8px;
   overflow: hidden;
   border: 1px solid var(--tf-border);
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
@@ -436,6 +440,71 @@
 
 .note-section p + p {
   margin-top: 0.75rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Dashboard preview tabs                                                */
+/* ------------------------------------------------------------------ */
+
+.preview-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--tf-border);
+  margin-bottom: 0;
+}
+
+.preview-tab {
+  padding: 9px 20px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--tf-muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  cursor: pointer;
+  transition: color 0.12s;
+  font-family: inherit;
+  letter-spacing: 0.01em;
+}
+
+.preview-tab:hover {
+  color: var(--md-typeset-color);
+}
+
+.preview-tab--active {
+  color: #009688;
+  border-bottom-color: #009688;
+  font-weight: 600;
+}
+
+.preview-panel { display: none; }
+.preview-panel--active { display: block; }
+
+/* ------------------------------------------------------------------ */
+/* Clickable images                                                      */
+/* ------------------------------------------------------------------ */
+
+.img-link {
+  display: block;
+  cursor: zoom-in;
+}
+
+/* ------------------------------------------------------------------ */
+/* Guide screenshots                                                     */
+/* ------------------------------------------------------------------ */
+
+.screenshot {
+  border-radius: 8px;
+  border: 1px solid var(--tf-border);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+  width: 100%;
+  display: block;
+  margin: 0.5rem 0 1.5rem;
+}
+
+[data-md-color-scheme="slate"] .screenshot {
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
 }
 
 /* ------------------------------------------------------------------ */

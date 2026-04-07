@@ -32,6 +32,8 @@ class TaskRecord:
     end_time: datetime | None = None
     retries_used: int = 0
     error: str | None = None
+    logs: list[str] = field(default_factory=list)
+    stacktrace: str | None = None
 
     @property
     def duration(self) -> float | None:
@@ -50,4 +52,6 @@ class TaskRecord:
             "duration": self.duration,
             "retries_used": self.retries_used,
             "error": self.error,
+            "logs": list(self.logs),
+            "stacktrace": self.stacktrace,
         }

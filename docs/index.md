@@ -5,7 +5,7 @@ hide:
 ---
 
 <div class="hero">
-  <h1>Turn FastAPI BackgroundTasks into a production-ready task system</h1>
+  <h1>Turn <span class="hero-accent">FastAPI BackgroundTasks</span> into a production-ready task system</h1>
   <p class="sub">Retries, control, and visibility without workers or brokers.</p>
   <div class="hero-actions">
     <a class="btn btn-primary" href="getting-started/installation/">Get Started</a>
@@ -30,6 +30,7 @@ hide:
         <li>No visibility into what ran</li>
         <li>No history after restart</li>
         <li>No metrics or duration</li>
+        <li>No logs or error traces</li>
       </ul>
     </div>
     <div class="compare-col">
@@ -40,6 +41,7 @@ hide:
         <li>Live dashboard over SSE</li>
         <li>SQLite or Redis persistence</li>
         <li>Success rate and duration metrics</li>
+        <li>Per-task logs and full stack traces</li>
       </ul>
     </div>
   </div>
@@ -51,7 +53,7 @@ hide:
 
 ```python
 from fastapi import BackgroundTasks, FastAPI
-from fastapi_taskflow import TaskAdmin, TaskManager
+from fastapi_taskflow import TaskAdmin, TaskManager, task_log
 
 task_manager = TaskManager(snapshot_db="tasks.db")
 app = FastAPI()
@@ -60,6 +62,7 @@ TaskAdmin(app, task_manager, auto_install=True)
 
 @task_manager.task(retries=3, delay=1.0, backoff=2.0)
 def send_email(address: str) -> None:
+    task_log(f"Sending to {address}")
     ...  # your logic here
 
 
@@ -75,9 +78,36 @@ def signup(email: str, background_tasks: BackgroundTasks):
 <div class="dashboard-section">
   <p class="section-label">Dashboard</p>
   <p class="section-title">Live visibility out of the box</p>
-  <div class="dashboard-preview">
-    <img src="assets/images/dashboard.png" alt="fastapi-taskflow live dashboard" class="dashboard-img" />
+  <div class="preview-tabs">
+    <button class="preview-tab preview-tab--active" onclick="showPreview(this,'preview-dashboard')">Dashboard</button>
+    <button class="preview-tab" onclick="showPreview(this,'preview-logs')">Logs</button>
+    <button class="preview-tab" onclick="showPreview(this,'preview-error')">Error</button>
   </div>
+  <div class="dashboard-preview">
+    <div id="preview-dashboard" class="preview-panel preview-panel--active">
+      <a href="assets/images/dashboard.png" target="_blank" class="img-link">
+        <img src="assets/images/dashboard.png" alt="Task dashboard overview" class="dashboard-img" />
+      </a>
+    </div>
+    <div id="preview-logs" class="preview-panel">
+      <a href="assets/images/logs.png" target="_blank" class="img-link">
+        <img src="assets/images/logs.png" alt="Task logs panel" class="dashboard-img" />
+      </a>
+    </div>
+    <div id="preview-error" class="preview-panel">
+      <a href="assets/images/error.png" target="_blank" class="img-link">
+        <img src="assets/images/error.png" alt="Task error and stack trace panel" class="dashboard-img" />
+      </a>
+    </div>
+  </div>
+  <script>
+  function showPreview(btn, panelId) {
+    btn.closest('.dashboard-section').querySelectorAll('.preview-tab').forEach(function(t){ t.classList.remove('preview-tab--active'); });
+    btn.closest('.dashboard-section').querySelectorAll('.preview-panel').forEach(function(p){ p.classList.remove('preview-panel--active'); });
+    btn.classList.add('preview-tab--active');
+    document.getElementById(panelId).classList.add('preview-panel--active');
+  }
+  </script>
 </div>
 
 <div class="section">
@@ -119,6 +149,12 @@ def signup(email: str, background_tasks: BackgroundTasks):
     <span class="icon">⇌</span>
     <h3>Zero-Migration Injection</h3>
     <p>Keep your existing <code>background_tasks: BackgroundTasks</code> signatures. One line at startup is all it takes.</p>
+  </div>
+
+  <div class="feature-card">
+    <span class="icon">≡</span>
+    <h3>Task Logging</h3>
+    <p>Call <code>task_log()</code> inside any task to capture timestamped log entries. Logs and full stack traces appear in the dashboard detail panel.</p>
   </div>
 
   </div>

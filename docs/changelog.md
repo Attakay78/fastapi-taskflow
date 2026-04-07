@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.2.0
+
+### Task logging
+
+- Added `task_log(message)` function. Call it inside any task to emit timestamped log entries that are stored on the task record and shown in the dashboard.
+- Retry attempts are separated automatically with a `--- Retry N ---` marker so per-attempt logs are easy to read.
+
+### Error visibility
+
+- Failed tasks now capture the full Python traceback in a `stacktrace` field on `TaskRecord`.
+- The dashboard detail panel now has three tabs: **Details**, **Logs**, and **Error**. The Logs and Error tabs are only shown when the task has data for them.
+
+### Storage
+
+- `TaskRecord` gains two new fields: `logs: list[str]` and `stacktrace: str | None`.
+- `SqliteBackend` stores both fields as new columns with automatic migration for existing databases.
+- `RedisBackend` stores both fields as hash entries. Old records without these fields load cleanly with empty defaults.
+
+---
+
 ## v0.1.0
 
 First public release.

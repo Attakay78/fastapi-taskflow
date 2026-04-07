@@ -41,7 +41,13 @@ class TaskRecord:
     end_time:     datetime | None
     retries_used: int
     error:        str | None
+    logs:         list[str]
+    stacktrace:   str | None
 ```
+
+`logs` holds timestamped entries written via `task_log()`. Each entry is a string in the format `YYYY-MM-DDTHH:MM:SS message`. Retry separators (`--- Retry N ---`) are inserted automatically by the executor.
+
+`stacktrace` holds the formatted Python traceback from the final failed attempt, or `None` if the task succeeded.
 
 ### Properties
 
@@ -53,4 +59,4 @@ class TaskRecord:
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `to_dict()` | `dict` | JSON-serialisable representation used by the API and dashboard. |
+| `to_dict()` | `dict` | JSON-serialisable representation used by the API and dashboard. Includes `logs` and `stacktrace`. |

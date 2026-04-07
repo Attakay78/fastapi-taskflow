@@ -87,6 +87,15 @@ class TaskStore:
         self._notify_change()
         return record
 
+    def append_log(self, task_id: str, message: str) -> None:
+        """Append a log entry to the task record and notify SSE subscribers."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if record is None:
+                return
+            record.logs.append(message)
+        self._notify_change()
+
     def restore(self, record: TaskRecord) -> None:
         """Insert a pre-built record (e.g. loaded from a snapshot) without overwriting."""
         with self._lock:

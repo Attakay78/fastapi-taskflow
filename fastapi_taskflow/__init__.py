@@ -31,6 +31,7 @@ from .backends import RedisBackend, SnapshotBackend, SqliteBackend
 from .manager import TaskManager
 from .models import TaskConfig, TaskRecord, TaskStatus
 from .snapshot import SnapshotScheduler
+from .task_logging import task_log
 from .wrapper import ManagedBackgroundTasks
 
 __all__ = [
@@ -45,6 +46,7 @@ __all__ = [
     "SnapshotBackend",
     "SqliteBackend",
     "RedisBackend",
+    "task_log",
 ]
 
 __version__ = "0.1.0"

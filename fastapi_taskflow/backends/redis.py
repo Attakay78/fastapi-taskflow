@@ -114,6 +114,8 @@ class RedisBackend(SnapshotBackend):
             "error": record.error or "",
             "args_json": json.dumps(list(record.args), default=repr),
             "kwargs_json": json.dumps(record.kwargs, default=repr),
+            "logs_json": json.dumps(record.logs),
+            "stacktrace": record.stacktrace or "",
         }
 
     @staticmethod
@@ -147,6 +149,8 @@ class RedisBackend(SnapshotBackend):
             kwargs=json.loads(mapping["kwargs_json"])
             if mapping.get("kwargs_json")
             else {},
+            logs=json.loads(mapping["logs_json"]) if mapping.get("logs_json") else [],
+            stacktrace=mapping.get("stacktrace") or None,
         )
 
     # ------------------------------------------------------------------

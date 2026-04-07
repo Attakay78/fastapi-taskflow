@@ -8,26 +8,27 @@ edit_uri: ""
 theme:
   name: material
   logo: logo.svg
-  favicon: logo.svg
+  favicon: favicon.svg
   font:
     text: Geist
     code: Geist Mono
   palette:
     - scheme: default
-      primary: black
-      accent: indigo
+      primary: teal
+      accent: teal
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     - scheme: slate
-      primary: black
-      accent: indigo
+      primary: teal
+      accent: teal
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
   features:
     - navigation.instant
     - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
     - navigation.top
     - toc.follow
@@ -66,6 +67,7 @@ nav:
   - Guide:
     - Defining Tasks: guide/defining-tasks.md
     - Injection Patterns: guide/injection.md
+    - Task Logging: guide/logging.md
     - Persistence: guide/persistence.md
     - Pending Requeue: guide/requeue.md
     - Custom Backends: guide/backends.md
@@ -75,6 +77,7 @@ nav:
     - TaskManager: api/task-manager.md
     - TaskAdmin: api/task-admin.md
     - ManagedBackgroundTasks: api/managed-background-tasks.md
+    - task_log: api/task-log.md
     - Models: api/models.md
     - Backends: api/backends.md
   - Changelog: changelog.md

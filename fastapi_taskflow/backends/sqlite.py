@@ -26,7 +26,9 @@ CREATE TABLE IF NOT EXISTS task_snapshots (
     error          TEXT,
     snapshotted_at TEXT,
     args_json      TEXT,
-    kwargs_json    TEXT
+    kwargs_json    TEXT,
+    logs_json      TEXT,
+    stacktrace     TEXT
 )
 """
 
@@ -46,13 +48,16 @@ CREATE TABLE IF NOT EXISTS task_pending_requeue (
 _MIGRATIONS = [
     "ALTER TABLE task_snapshots ADD COLUMN args_json TEXT",
     "ALTER TABLE task_snapshots ADD COLUMN kwargs_json TEXT",
+    "ALTER TABLE task_snapshots ADD COLUMN logs_json TEXT",
+    "ALTER TABLE task_snapshots ADD COLUMN stacktrace TEXT",
 ]
 
 _UPSERT_HISTORY = """
 INSERT OR REPLACE INTO task_snapshots
     (task_id, func_name, status, created_at, start_time, end_time,
-     duration, retries_used, error, snapshotted_at, args_json, kwargs_json)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     duration, retries_used, error, snapshotted_at, args_json, kwargs_json,
+     logs_json, stacktrace)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _UPSERT_PENDING = """
@@ -119,6 +124,8 @@ class SqliteBackend(SnapshotBackend):
                 now,
                 json.dumps(list(t.args), default=repr),
                 json.dumps(t.kwargs, default=repr),
+                json.dumps(t.logs),
+                t.stacktrace,
             )
             for t in records
         ]
@@ -211,6 +218,8 @@ class SqliteBackend(SnapshotBackend):
                     if d.get("args_json")
                     else (),
                     kwargs=json.loads(d["kwargs_json"]) if d.get("kwargs_json") else {},
+                    logs=json.loads(d["logs_json"]) if d.get("logs_json") else [],
+                    stacktrace=d.get("stacktrace"),
                 )
             )
         return records

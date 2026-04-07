@@ -28,9 +28,19 @@ TaskAdmin(app, task_manager, path="/admin/tasks")
 - Search by task ID or function name
 - Sortable columns
 - Pagination (30 tasks per page)
-- Task detail slide-in panel with timeline and metadata
+- Task detail slide-in panel with three tabs: **Details**, **Logs**, **Error**
 - Copy task ID to clipboard
 - Metrics row: total, pending, running, success, failed, success rate, avg duration
+
+## Task detail tabs
+
+The detail panel has three tabs. **Logs** and **Error** are only shown when the task has data for them.
+
+| Tab | Content |
+|-----|---------|
+| Details | Task ID, function, status, timestamps, duration, retries, analytics, recent runs |
+| Logs | Timestamped log entries emitted via `task_log()`. Retry attempts are separated by a `--- Retry N ---` marker. |
+| Error | Error message and full stack trace for failed tasks. |
 
 ## Showing task arguments
 

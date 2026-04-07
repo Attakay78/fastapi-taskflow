@@ -214,26 +214,42 @@ _DASHBOARD_TEMPLATE = """\
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Task Dashboard · FastAPI-TaskFlow</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'><rect width='200' height='200' rx='40' ry='40' fill='%23111111'/><polyline points='20,100 55,100 80,145 120,55 145,100 180,100' fill='none' stroke='white' stroke-width='18' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'><rect width='200' height='200' rx='40' ry='40' fill='%23009688'/><polyline points='20,100 55,100 80,145 120,55 145,100 180,100' fill='none' stroke='white' stroke-width='18' stroke-linecap='round' stroke-linejoin='round'/></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script>(function(){var t=localStorage.getItem('tf-theme')||'light';document.documentElement.setAttribute('data-theme',t);})();</script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --db-bg: #f5f5f5; --db-surface: #ffffff; --db-surface-2: #fafafa;
+      --db-surface-3: #f3f4f6; --db-surface-hover: #f9fafb;
+      --db-border: #e5e7eb; --db-border-2: #f3f4f6;
+      --db-text: #111111; --db-text-2: #374151; --db-text-3: #6b7280;
+      --db-text-muted: #888888; --db-text-faint: #aaaaaa; --db-text-xfaint: #cccccc;
+    }
+    [data-theme="dark"] {
+      --db-bg: #0d1117; --db-surface: #161b22; --db-surface-2: #1c2128;
+      --db-surface-3: #21262d; --db-surface-hover: #1c2128;
+      --db-border: #30363d; --db-border-2: #21262d;
+      --db-text: #e6edf3; --db-text-2: #c9d1d9; --db-text-3: #8b949e;
+      --db-text-muted: #8b949e; --db-text-faint: #6e7681; --db-text-xfaint: #484f58;
+    }
 
     body {
       font-family: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       font-size: 14px;
-      background: #f5f5f5;
-      color: #111;
+      background: var(--db-bg);
+      color: var(--db-text);
       min-height: 100vh;
       -webkit-font-smoothing: antialiased;
     }
 
     /* ── Header ─────────────────────────────────────────────── */
     .header {
-      background: #fff;
-      border-bottom: 1px solid #e5e7eb;
+      background: var(--db-surface);
+      border-bottom: 1px solid var(--db-border);
       height: 52px;
       display: flex;
       align-items: center;
@@ -243,18 +259,12 @@ _DASHBOARD_TEMPLATE = """\
       z-index: 100;
       gap: 10px;
     }
-    .header-icon {
-      width: 26px; height: 26px;
-      flex-shrink: 0;
-    }
-    .header-title { font-size: 14px; font-weight: 600; color: #111; }
-    .logout-btn { font-size: 12px; color: #6b7280; text-decoration: none; padding: 4px 10px; border: 1px solid #e5e7eb; border-radius: 5px; font-weight: 500; transition: color .15s, background .15s; }
-    .logout-btn:hover { color: #111; background: #f3f4f6; }
-    .header-badge {
-      font-size: 11px; color: #888;
-      background: #f3f4f6; border: 1px solid #e5e7eb;
-      border-radius: 4px; padding: 1px 7px; font-weight: 500;
-    }
+    .header-icon { width: 26px; height: 26px; flex-shrink: 0; }
+    .header-title { font-size: 14px; font-weight: 600; color: #009688; }
+    .logout-btn { font-size: 12px; color: var(--db-text-3); text-decoration: none; padding: 4px 10px; border: 1px solid var(--db-border); border-radius: 5px; font-weight: 500; transition: color .15s, background .15s; }
+    .logout-btn:hover { color: var(--db-text); background: var(--db-surface-3); }
+    .header-badge { font-size: 11px; color: #009688; background: rgba(0,150,136,.08); border: 1px solid rgba(0,150,136,.25); border-radius: 4px; padding: 1px 7px; font-weight: 500; }
+    .theme-btn { width: 28px; height: 28px; border: 1px solid var(--db-border); border-radius: 6px; background: var(--db-surface); cursor: pointer; color: var(--db-text-muted); display: flex; align-items: center; justify-content: center; transition: background .1s, border-color .1s, color .1s; flex-shrink: 0; }
 
     /* ── Main ───────────────────────────────────────────────── */
     .main { max-width: 1440px; margin: 0 auto; padding: 24px 24px 64px; }
@@ -264,7 +274,7 @@ _DASHBOARD_TEMPLATE = """\
     .dot--error { background: #f31260; }
     .dot--connecting { background: #f59e0b; }
     @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.35 } }
-    .status-label { font-size: 12px; color: #888; font-weight: 500; }
+    .status-label { font-size: 12px; color: var(--db-text-muted); font-weight: 500; }
     .status-label--live  { color: #16a34a; }
     .status-label--error { color: #dc2626; }
 
@@ -297,21 +307,22 @@ _DASHBOARD_TEMPLATE = """\
     .filter-row .sel { flex: 1; min-width: 0; }
 
     /* ── Task count row ─────────────────────────────────────── */
-    .task-count { font-size: 12px; color: #aaa; margin-bottom: 8px; display: block; }
+    .task-count { font-size: 12px; color: var(--db-text-faint); margin-bottom: 8px; display: block; }
 
     /* ── Inputs ─────────────────────────────────────────────── */
     .sel, .search {
       height: 32px;
-      border: 1px solid #e5e7eb; border-radius: 6px;
+      border: 1px solid var(--db-border); border-radius: 6px;
       padding: 0 10px; font-size: 13px; font-family: inherit;
-      background: #fff; color: #111; outline: none;
+      background: var(--db-surface); color: var(--db-text); outline: none;
       transition: border-color .15s, box-shadow .15s; cursor: pointer;
       width: 100%;
     }
-    .sel:hover, .search:hover { border-color: #c0c0c0; }
-    .sel:focus, .search:focus { border-color: #0070f3; box-shadow: 0 0 0 3px rgba(0,112,243,.1); }
+    .sel option { background: var(--db-surface); color: var(--db-text); }
+    .sel:hover, .search:hover { border-color: var(--db-text-muted); }
+    .sel:focus, .search:focus { border-color: #009688; box-shadow: 0 0 0 3px rgba(0,150,136,.12); }
     .search { cursor: text; }
-    .search::placeholder { color: #ccc; }
+    .search::placeholder { color: var(--db-text-xfaint); }
     .metric-card {
       border: 1px solid transparent;
       border-radius: 10px;
@@ -351,34 +362,50 @@ _DASHBOARD_TEMPLATE = """\
     .mc-avg     .metric-label { color: #a21caf; }
     .mc-avg     .metric-value { color: #86198f; }
 
+    [data-theme="dark"] .mc-total   { background: rgba(124,58,237,.1); border-color: rgba(124,58,237,.25); }
+    [data-theme="dark"] .mc-total   .metric-label { color: #a78bfa; }
+    [data-theme="dark"] .mc-total   .metric-value { color: #c4b5fd; }
+    [data-theme="dark"] .mc-pending { background: var(--db-surface-2); border-color: var(--db-border); }
+    [data-theme="dark"] .mc-pending .metric-label { color: #9ca3af; }
+    [data-theme="dark"] .mc-pending .metric-value { color: #d1d5db; }
+    [data-theme="dark"] .mc-running { background: rgba(67,56,202,.12); border-color: rgba(99,102,241,.3); }
+    [data-theme="dark"] .mc-running .metric-label { color: #818cf8; }
+    [data-theme="dark"] .mc-running .metric-value { color: #a5b4fc; }
+    [data-theme="dark"] .mc-success { background: rgba(21,128,61,.1); border-color: rgba(21,128,61,.3); }
+    [data-theme="dark"] .mc-success .metric-label { color: #4ade80; }
+    [data-theme="dark"] .mc-success .metric-value { color: #86efac; }
+    [data-theme="dark"] .mc-failed  { background: rgba(185,28,28,.1); border-color: rgba(220,38,38,.25); }
+    [data-theme="dark"] .mc-failed  .metric-label { color: #f87171; }
+    [data-theme="dark"] .mc-failed  .metric-value { color: #fca5a5; }
+    [data-theme="dark"] .mc-rate    { background: rgba(180,83,9,.1); border-color: rgba(245,158,11,.25); }
+    [data-theme="dark"] .mc-rate    .metric-label { color: #fbbf24; }
+    [data-theme="dark"] .mc-rate    .metric-value { color: #fcd34d; }
+    [data-theme="dark"] .mc-avg     { background: rgba(162,28,175,.1); border-color: rgba(217,70,239,.25); }
+    [data-theme="dark"] .mc-avg     .metric-label { color: #e879f9; }
+    [data-theme="dark"] .mc-avg     .metric-value { color: #f0abfc; }
+
     /* ── Table ──────────────────────────────────────────────── */
-    .table-wrap { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; overflow: hidden; }
+    .table-wrap { background: var(--db-surface); border: 1px solid var(--db-border); border-radius: 10px; overflow: hidden; }
     table { width: 100%; border-collapse: collapse; }
-    .th {
-      padding: 9px 14px; text-align: left;
-      font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
-      color: #888; font-weight: 600;
-      background: #fafafa; border-bottom: 1px solid #e5e7eb;
-      cursor: pointer; user-select: none; white-space: nowrap;
-    }
-    .th:hover { color: #333; background: #f3f4f6; }
-    .th--active { color: #0070f3; }
+    .th { padding: 9px 14px; text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--db-text-muted); font-weight: 600; background: var(--db-surface-2); border-bottom: 1px solid var(--db-border); cursor: pointer; user-select: none; white-space: nowrap; }
+    .th:hover { color: var(--db-text-2); background: var(--db-surface-3); }
+    .th--active { color: #009688; }
     .th--r { text-align: right; }
     .sort-icon { opacity: .4; font-size: 10px; margin-left: 3px; }
     .th--active .sort-icon { opacity: 1; }
-    .td { padding: 10px 14px; border-bottom: 1px solid #f3f4f6; font-size: 13px; color: #374151; vertical-align: middle; }
+    .td { padding: 10px 14px; border-bottom: 1px solid var(--db-border-2); font-size: 13px; color: var(--db-text-2); vertical-align: middle; }
     .row { cursor: pointer; transition: background .1s; }
-    .row:hover { background: #f9fafb; }
-    .row--selected { background: #eff6ff !important; }
+    .row:hover { background: var(--db-surface-hover); }
+    .row--selected { background: rgba(0,150,136,.07) !important; }
     .row:last-child .td { border-bottom: none; }
-    .td--mono { font-family: 'Geist Mono', 'JetBrains Mono', 'Fira Code', monospace; font-size: 11.5px; color: #aaa; }
-    .td--func { font-weight: 500; color: #111; }
-    .td--r    { text-align: right; color: #6b7280; font-variant-numeric: tabular-nums; }
-    .td--date { color: #999; font-size: 12px; white-space: nowrap; padding-left: 24px; }
+    .td--mono { font-family: 'Geist Mono', 'JetBrains Mono', 'Fira Code', monospace; font-size: 11.5px; color: var(--db-text-faint); }
+    .td--func { font-weight: 500; color: var(--db-text); }
+    .td--r    { text-align: right; color: var(--db-text-3); font-variant-numeric: tabular-nums; }
+    .td--date { color: var(--db-text-faint); font-size: 12px; white-space: nowrap; padding-left: 24px; }
     .td--err  { max-width: 180px; }
     .err-text { color: #dc2626; font-size: 12px; }
-    .muted { color: #d1d5db; }
-    .empty { text-align: center; padding: 52px 16px; color: #bbb; font-size: 13px; }
+    .muted { color: var(--db-text-xfaint); }
+    .empty { text-align: center; padding: 52px 16px; color: var(--db-text-faint); font-size: 13px; }
 
     /* ── Badges ─────────────────────────────────────────────── */
     .badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; letter-spacing: .02em; }
@@ -386,85 +413,93 @@ _DASHBOARD_TEMPLATE = """\
     .badge--running { background: #ede9fe; color: #7c3aed; }
     .badge--success { background: #dcfce7; color: #16a34a; }
     .badge--failed  { background: #fee2e2; color: #dc2626; }
+    [data-theme="dark"] .badge--pending { background: var(--db-surface-3); color: #9ca3af; }
+    [data-theme="dark"] .badge--running { background: rgba(124,58,237,.2); color: #a78bfa; }
+    [data-theme="dark"] .badge--success { background: rgba(22,163,74,.2); color: #4ade80; }
+    [data-theme="dark"] .badge--failed  { background: rgba(220,38,38,.2); color: #f87171; }
 
     /* ── Detail Panel ───────────────────────────────────────── */
     .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.2); opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 200; }
     .backdrop--on { opacity: 1; pointer-events: auto; }
-    .panel {
-      position: fixed; top: 0; right: 0; bottom: 0; width: 440px; max-width: 100vw;
-      background: #fff; border-left: 1px solid #e5e7eb;
-      transform: translateX(100%);
-      transition: transform .25s cubic-bezier(.4,0,.2,1);
-      z-index: 201; display: flex; flex-direction: column;
-    }
+    [data-theme="dark"] .backdrop { background: rgba(0,0,0,.55); }
+    .panel { position: fixed; top: 0; right: 0; bottom: 0; width: 440px; max-width: 100vw; background: var(--db-surface); border-left: 1px solid var(--db-border); transform: translateX(100%); transition: transform .25s cubic-bezier(.4,0,.2,1); z-index: 201; display: flex; flex-direction: column; }
     .panel--open { transform: translateX(0); }
-    .panel-header { display: flex; align-items: center; gap: 10px; padding: 14px 20px; border-bottom: 1px solid #f3f4f6; flex-shrink: 0; }
-    .panel-title { font-size: 14px; font-weight: 600; color: #111; }
-    .panel-close {
-      margin-left: auto; width: 28px; height: 28px;
-      border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; cursor: pointer;
-      display: flex; align-items: center; justify-content: center;
-      color: #666; transition: background .1s, border-color .1s;
-    }
-    .panel-close:hover { background: #f3f4f6; border-color: #ccc; color: #111; }
+    .panel-header { display: flex; flex-direction: column; padding: 12px 20px 0; border-bottom: 1px solid var(--db-border-2); flex-shrink: 0; gap: 0; }
+    .panel-header-row { display: flex; align-items: center; gap: 10px; padding-bottom: 10px; }
+    .panel-title { font-size: 14px; font-weight: 600; color: var(--db-text); }
+    .panel-tabs { display: flex; gap: 2px; margin: 0 -20px; padding: 0 20px; }
+    .panel-tab { padding: 5px 11px; font-size: 12px; font-weight: 500; color: var(--db-text-3); background: none; border: none; border-bottom: 2px solid transparent; cursor: pointer; margin-bottom: -1px; border-radius: 4px 4px 0 0; transition: color .12s; }
+    .panel-tab:hover { color: var(--db-text); }
+    .panel-tab.panel-tab--active { color: #009688; border-bottom-color: #009688; }
+    .panel-tab--error.panel-tab--active { color: #dc2626; border-bottom-color: #dc2626; }
+    .panel-close { margin-left: auto; width: 28px; height: 28px; border: 1px solid var(--db-border); border-radius: 6px; background: var(--db-surface); cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--db-text-3); transition: background .1s, border-color .1s; }
+    .panel-close:hover { background: var(--db-surface-3); color: var(--db-text); }
     .panel-body { flex: 1; overflow-y: auto; padding: 20px; overscroll-behavior: contain; }
 
     /* Copy button */
-    .copy-btn {
-      display: inline-flex; align-items: center; justify-content: center;
-      width: 26px; height: 26px; flex-shrink: 0;
-      border: 1px solid #e5e7eb; border-radius: 5px;
-      background: #fff; cursor: pointer; color: #aaa;
-      transition: background .1s, border-color .1s, color .1s;
-    }
-    .copy-btn:hover { background: #f3f4f6; border-color: #bbb; color: #333; }
+    .copy-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; flex-shrink: 0; border: 1px solid var(--db-border); border-radius: 5px; background: var(--db-surface); cursor: pointer; color: var(--db-text-faint); transition: background .1s, border-color .1s, color .1s; }
+    .copy-btn:hover { background: var(--db-surface-3); border-color: var(--db-text-faint); color: var(--db-text); }
 
     /* Toast */
-    .toast {
-      position: fixed; bottom: 24px; right: 24px; z-index: 400;
-      background: #111; color: #fff;
-      font-size: 13px; font-weight: 500;
-      padding: 10px 16px; border-radius: 8px;
-      display: flex; align-items: center; gap: 8px;
-      box-shadow: 0 4px 14px rgba(0,0,0,.2);
-      opacity: 0; transform: translateY(6px);
-      transition: opacity .2s, transform .2s;
-      pointer-events: none;
-    }
+    .toast { position: fixed; bottom: 24px; right: 24px; z-index: 400; background: var(--db-text); color: var(--db-bg); font-size: 13px; font-weight: 500; padding: 10px 16px; border-radius: 8px; display: flex; align-items: center; gap: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.2); opacity: 0; transform: translateY(6px); transition: opacity .2s, transform .2s; pointer-events: none; }
     .toast--on { opacity: 1; transform: translateY(0); }
 
     /* Pagination */
     .pagination { display: flex; align-items: center; gap: 8px; margin-top: 10px; justify-content: flex-end; }
-    .pg-btn {
-      height: 30px; min-width: 30px; padding: 0 10px;
-      border: 1px solid #e5e7eb; border-radius: 6px;
-      background: #fff; cursor: pointer;
-      font-size: 12px; font-family: inherit; color: #374151;
-      transition: background .1s, border-color .1s;
-    }
-    .pg-btn:hover:not(:disabled) { background: #f3f4f6; border-color: #ccc; }
+    .pg-btn { height: 30px; min-width: 30px; padding: 0 10px; border: 1px solid var(--db-border); border-radius: 6px; background: var(--db-surface); cursor: pointer; font-size: 12px; font-family: inherit; color: var(--db-text-2); transition: background .1s, border-color .1s; }
+    .pg-btn:hover:not(:disabled) { background: var(--db-surface-3); }
     .pg-btn:disabled { opacity: .35; cursor: default; }
-    .pg-info { font-size: 12px; color: #888; }
+    .pg-info { font-size: 12px; color: var(--db-text-muted); }
 
     /* Detail content */
     .d-section { margin-bottom: 16px; }
-    .d-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: #bbb; font-weight: 500; margin-bottom: 4px; }
-    .d-val { font-size: 13px; color: #111; }
-    .d-mono { font-family: 'Geist Mono', monospace; font-size: 11.5px; color: #555; word-break: break-all; }
+    .d-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--db-text-faint); font-weight: 500; margin-bottom: 4px; }
+    .d-val { font-size: 13px; color: var(--db-text); }
+    .d-mono { font-family: 'Geist Mono', monospace; font-size: 11.5px; color: var(--db-text-3); word-break: break-all; }
     .d-func { font-weight: 600; font-size: 14px; }
     .d-error { font-size: 12px; color: #dc2626; background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; padding: 10px 12px; font-family: 'Geist Mono', monospace; white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow-y: auto; }
+    [data-theme="dark"] .d-error { background: rgba(220,38,38,.1); border-color: rgba(220,38,38,.3); color: #fca5a5; }
+    .d-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--db-border); margin-bottom: 12px; }
+    .d-tab { padding: 5px 12px; font-size: 12px; font-weight: 500; color: var(--db-text-3); background: none; border: none; border-bottom: 2px solid transparent; cursor: pointer; margin-bottom: -1px; border-radius: 4px 4px 0 0; transition: color .12s; }
+    .d-tab:hover { color: var(--db-text); }
+    .d-tab.d-tab--active { color: #009688; border-bottom-color: #009688; }
+    .d-tab.d-tab--error.d-tab--active { color: #dc2626; border-bottom-color: #dc2626; }
+    .d-tab-panel { display: none; }
+    .d-tab-panel.d-tab-panel--active { display: block; }
+    .d-logs { font-family: 'Geist Mono', monospace; font-size: 11.5px; color: var(--db-text-2); background: var(--db-surface-2); border: 1px solid var(--db-border); border-radius: 6px; padding: 10px 12px; max-height: 220px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; line-height: 1.6; }
+    .d-logs .log-line { display: flex; gap: 8px; }
+    .d-logs .log-ts { color: var(--db-text-faint); flex-shrink: 0; }
+    .d-logs .log-sep { color: var(--db-text-faint); font-style: italic; }
+    .d-error-msg { font-size: 12px; color: #dc2626; background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; padding: 10px 12px; font-weight: 500; margin-bottom: 8px; }
+    [data-theme="dark"] .d-error-msg { background: rgba(220,38,38,.1); border-color: rgba(220,38,38,.3); color: #f87171; }
+    .d-stacktrace { font-size: 11px; color: #7f1d1d; background: #fff5f5; padding: 10px 12px; font-family: 'Geist Mono', monospace; white-space: pre-wrap; word-break: break-all; max-height: 280px; overflow-y: auto; border: 1px solid #fecaca; border-radius: 6px; }
+    [data-theme="dark"] .d-stacktrace { color: #fca5a5; background: rgba(220,38,38,.08); border-color: rgba(220,38,38,.25); }
     .d-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; margin-bottom: 16px; }
     .d-row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 10px; margin-bottom: 16px; }
-    .divider { height: 1px; background: #f3f4f6; margin: 20px 0; }
-    .section-title { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 12px; }
+    .divider { height: 1px; background: var(--db-border-2); margin: 20px 0; }
+    .section-title { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: var(--db-text-3); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 12px; }
     .analytics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .a-card { background: #fafafa; border: 1px solid #f0f0f0; border-radius: 6px; padding: 10px 12px; }
-    .a-label { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: #ccc; font-weight: 500; margin-bottom: 3px; }
+    .a-card { background: var(--db-surface-2); border: 1px solid var(--db-border-2); border-radius: 6px; padding: 10px 12px; }
+    .a-label { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--db-text-xfaint); font-weight: 500; margin-bottom: 3px; }
     .a-value { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .a-value--neutral { color: var(--db-text); }
+    .a-value--success { color: #16a34a; }
+    .a-value--danger  { color: #dc2626; }
+    .a-value--running { color: #7c3aed; }
+    .a-value--warning { color: #d97706; }
+    [data-theme="dark"] .a-value--success { color: #4ade80; }
+    [data-theme="dark"] .a-value--danger  { color: #f87171; }
+    [data-theme="dark"] .a-value--running { color: #a78bfa; }
+    [data-theme="dark"] .a-value--warning { color: #fbbf24; }
     .recent-runs { display: flex; flex-direction: column; gap: 6px; }
-    .r-run { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid #f0f0f0; border-radius: 6px; cursor: pointer; transition: background .1s; }
-    .r-run:hover { background: #fafafa; }
-    .r-run--cur { background: #eff6ff; border-color: #bfdbfe; }
+    .r-run { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--db-border-2); border-radius: 6px; cursor: pointer; transition: background .1s; }
+    .r-run:hover { background: var(--db-surface-2); }
+    .r-run--cur { background: rgba(0,150,136,.07); border-color: rgba(0,150,136,.25); }
+    .r-dur { font-size: 11px; margin-left: auto; color: var(--db-text-faint); }
+    .arg-idx  { font-size: 10px; color: var(--db-text-xfaint); min-width: 18px; text-align: right; }
+    .arg-key  { font-size: 11px; color: var(--db-text-3); }
+    .arg-eq   { font-size: 11px; color: var(--db-text-xfaint); }
+    .arg-code { background: var(--db-surface-2); border: 1px solid var(--db-border-2); border-radius: 4px; padding: 2px 7px; font-size: 11.5px; }
 
   </style>
 </head>
@@ -472,14 +507,17 @@ _DASHBOARD_TEMPLATE = """\
 
 <header class="header">
   <svg class="header-icon" width="26" height="26" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
-    <rect width="200" height="200" rx="40" ry="40" fill="#111111"/>
+    <rect width="200" height="200" rx="40" ry="40" fill="#009688"/>
     <polyline points="20,100 55,100 80,145 120,55 145,100 180,100" fill="none" stroke="white" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>
   <span class="header-title">Task Dashboard</span>
   <span class="header-badge">fastapi-taskflow</span>
-  <div style="margin-left:auto;display:flex;align-items:center;gap:14px">
+  <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
     <span class="dot dot--connecting" id="live-dot"></span>
     <span class="status-label" id="live-label">Connecting\u2026</span>
+    <button class="theme-btn" id="theme-btn" onclick="toggleTheme()" title="Switch to dark mode">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
     __LOGOUT_BUTTON__
   </div>
 </header>
@@ -498,7 +536,7 @@ _DASHBOARD_TEMPLATE = """\
       <div class="metric-card mc-avg">    <div class="metric-label">Avg Duration</div> <div class="metric-value" id="metric-avg">\u2014</div></div>
     </div>
     <div class="filters-right">
-      <input type="text" class="search" id="search-input" placeholder="Search by ID or function\u2026">
+      <input type="text" class="search" id="search-input" placeholder="Search by ID or function\u2026" autocomplete="off" spellcheck="false">
       <div class="filter-row">
         <select class="sel" id="status-filter">
           <option value="all">All statuses</option>
@@ -545,12 +583,15 @@ _DASHBOARD_TEMPLATE = """\
 
 <div class="panel" id="detail-panel">
   <div class="panel-header">
-    <span class="panel-title">Task Detail</span>
-    <button class="panel-close" id="detail-close" aria-label="Close">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-        <line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>
-      </svg>
-    </button>
+    <div class="panel-header-row">
+      <span class="panel-title">Task Detail</span>
+      <button class="panel-close" id="detail-close" aria-label="Close">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+      </button>
+    </div>
+    <div class="panel-tabs" id="detail-tabs"></div>
   </div>
   <div class="panel-body" id="detail-content"></div>
 </div>
@@ -745,6 +786,7 @@ _DASHBOARD_TEMPLATE = """\
     selectedId = null;
     document.getElementById('detail-panel').classList.remove('panel--open');
     document.getElementById('detail-backdrop').classList.remove('backdrop--on');
+    document.getElementById('detail-tabs').innerHTML = '';
     document.body.style.overflow = '';
     document.querySelectorAll('.row').forEach(r => r.classList.remove('row--selected'));
   }
@@ -761,7 +803,7 @@ _DASHBOARD_TEMPLATE = """\
     const fMin  = fDurs.length ? Math.min(...fDurs).toFixed(0) : null;
     const fMax  = fDurs.length ? Math.max(...fDurs).toFixed(0) : null;
     const fRate = fTotal ? (fSuccess / fTotal * 100).toFixed(1) : null;
-    const rateColor = fRate == null ? '#111' : fRate >= 80 ? '#16a34a' : fRate >= 50 ? '#d97706' : '#dc2626';
+    const rateCls = fRate == null ? 'neutral' : fRate >= 80 ? 'success' : fRate >= 50 ? 'warning' : 'danger';
 
     const recent = [...ft].sort((a,b)=>(b.created_at||'').localeCompare(a.created_at||'')).slice(0,5);
 
@@ -770,7 +812,29 @@ _DASHBOARD_TEMPLATE = """\
     const started = task.start_time ? fmtDate(task.start_time) : '\u2014';
     const ended   = task.end_time   ? fmtDate(task.end_time)   : '\u2014';
 
-    document.getElementById('detail-content').innerHTML =
+    const hasLogs  = task.logs  && task.logs.length;
+    const hasError = task.error;
+
+    // ── Build header tabs ────────────────────────────────────────
+    const tabsEl = document.getElementById('detail-tabs');
+    tabsEl.innerHTML = '';
+
+    function makeTab(label, panelId, extraClass) {
+      var btn = document.createElement('button');
+      btn.className = 'panel-tab' + (extraClass ? ' ' + extraClass : '');
+      btn.dataset.panel = panelId;
+      btn.onclick = function() { switchTab(this); };
+      btn.textContent = label;
+      tabsEl.appendChild(btn);
+      return btn;
+    }
+
+    makeTab('Details', 'panel-details').classList.add('panel-tab--active');
+    if (hasLogs)  makeTab('Logs (' + task.logs.length + ')', 'panel-logs');
+    if (hasError) makeTab('Error', 'panel-error', 'panel-tab--error');
+
+    // ── Details panel ────────────────────────────────────────────
+    var detailsHtml =
       '<div class="d-section"><div class="d-label">Task ID</div>'
       + '<div style="display:flex;align-items:center;gap:8px;margin-top:4px">'
       + '<div class="d-mono" style="flex:1;word-break:break-all">' + esc(task.task_id) + '</div>'
@@ -797,8 +861,6 @@ _DASHBOARD_TEMPLATE = """\
       + dSec('Retries Used', '<span class="d-val">' + task.retries_used + '</span>')
       + '</div>'
 
-      + (task.error ? '<div class="d-section"><div class="d-label">Error</div><div class="d-error">' + esc(task.error) + '</div></div>' : '')
-
       + (SHOW_ARGS && ((task.args && task.args.length) || (task.kwargs && Object.keys(task.kwargs).length)) ?
           '<div class="divider"></div>'
           + '<div class="section-title">'
@@ -808,8 +870,8 @@ _DASHBOARD_TEMPLATE = """\
               '<div class="d-section"><div class="d-label">Positional args</div>'
               + task.args.map(function(a, i) {
                   return '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">'
-                    + '<span style="font-size:10px;color:#ccc;min-width:18px;text-align:right">' + i + '</span>'
-                    + '<code class="d-mono" style="background:#f9fafb;border:1px solid #f0f0f0;border-radius:4px;padding:2px 7px;font-size:11.5px">' + esc(a) + '</code>'
+                    + '<span class="arg-idx">' + i + '</span>'
+                    + '<code class="d-mono arg-code">' + esc(a) + '</code>'
                     + '</div>';
                 }).join('')
               + '</div>'
@@ -818,9 +880,9 @@ _DASHBOARD_TEMPLATE = """\
               '<div class="d-section"><div class="d-label">Keyword args</div>'
               + Object.entries(task.kwargs).map(function(kv) {
                   return '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">'
-                    + '<span style="font-size:11px;color:#888;min-width:fit-content">' + esc(kv[0]) + '</span>'
-                    + '<span style="color:#ccc;font-size:11px">=</span>'
-                    + '<code class="d-mono" style="background:#f9fafb;border:1px solid #f0f0f0;border-radius:4px;padding:2px 7px;font-size:11.5px">' + esc(kv[1]) + '</code>'
+                    + '<span class="arg-key">' + esc(kv[0]) + '</span>'
+                    + '<span class="arg-eq">=</span>'
+                    + '<code class="d-mono arg-code">' + esc(kv[1]) + '</code>'
                     + '</div>';
                 }).join('')
               + '</div>'
@@ -833,14 +895,14 @@ _DASHBOARD_TEMPLATE = """\
       + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>'
       + 'Function Analytics \u00b7 ' + esc(task.func_name) + '</div>'
       + '<div class="analytics-grid" style="margin-bottom:4px">'
-      + aCard('Total Runs',    fTotal,                           '#111')
-      + aCard('Success',       fSuccess,                         '#16a34a')
-      + aCard('Failed',        fFailed,  fFailed  > 0 ? '#dc2626' : '#111')
-      + aCard('Running',       fRunning, fRunning > 0 ? '#7c3aed' : '#111')
-      + aCard('Success Rate',  fRate  != null ? fRate  + '%'  : '\u2014', rateColor)
-      + aCard('Avg Duration',  fAvg   != null ? fAvg   + ' ms': '\u2014', '#111')
-      + aCard('Min Duration',  fMin   != null ? fMin   + ' ms': '\u2014', '#111')
-      + aCard('Max Duration',  fMax   != null ? fMax   + ' ms': '\u2014', '#111')
+      + aCard('Total Runs',    fTotal,                                        'neutral')
+      + aCard('Success',       fSuccess,                                      'success')
+      + aCard('Failed',        fFailed,  fFailed  > 0 ? 'danger'  : 'neutral')
+      + aCard('Running',       fRunning, fRunning > 0 ? 'running' : 'neutral')
+      + aCard('Success Rate',  fRate  != null ? fRate  + '%'  : '\u2014', rateCls)
+      + aCard('Avg Duration',  fAvg   != null ? fAvg   + ' ms': '\u2014', 'neutral')
+      + aCard('Min Duration',  fMin   != null ? fMin   + ' ms': '\u2014', 'neutral')
+      + aCard('Max Duration',  fMax   != null ? fMax   + ' ms': '\u2014', 'neutral')
       + '</div>'
 
       + '<div class="divider"></div>'
@@ -853,20 +915,56 @@ _DASHBOARD_TEMPLATE = """\
           '<div class="r-run' + (r.task_id === task.task_id ? ' r-run--cur' : '') + '" onclick="openDetail(this.dataset.id)" data-id="' + r.task_id + '">'
           + '<span class="d-mono" style="font-size:11px">' + esc(r.task_id.slice(0,8)) + '\u2026</span>'
           + badge(r.status)
-          + '<span style="font-size:11px;margin-left:auto;color:#999">'
+          + '<span class="r-dur">'
           + (r.duration != null ? (r.duration*1000).toFixed(0)+' ms' : '\u2014')
           + '</span></div>'
         ).join('')
       + '</div>';
+
+    // ── Logs panel ───────────────────────────────────────────────
+    var logsHtml = hasLogs
+      ? '<div class="d-logs">'
+        + task.logs.map(function(line) {
+            if (line.startsWith('--- ')) return '<div class="log-sep">' + esc(line) + '</div>';
+            var ts = line.slice(0, 19), msg = line.slice(20);
+            return '<div class="log-line"><span class="log-ts">' + esc(ts) + '</span><span>' + esc(msg) + '</span></div>';
+          }).join('')
+        + '</div>'
+      : '';
+
+    // ── Error panel ──────────────────────────────────────────────
+    var errorHtml = hasError
+      ? '<div class="d-error-msg">' + esc(task.error) + '</div>'
+        + (task.stacktrace ? '<div class="d-stacktrace">' + esc(task.stacktrace) + '</div>' : '')
+      : '';
+
+    // ── Render all three panels into detail-content ──────────────
+    document.getElementById('detail-content').innerHTML =
+        '<div id="panel-details" class="d-tab-panel d-tab-panel--active">' + detailsHtml + '</div>'
+      + (hasLogs  ? '<div id="panel-logs"  class="d-tab-panel">' + logsHtml  + '</div>' : '')
+      + (hasError ? '<div id="panel-error" class="d-tab-panel">' + errorHtml + '</div>' : '');
+  }
+
+  function switchTab(btn) {
+    var panelId = btn.dataset.panel;
+    document.getElementById('detail-tabs').querySelectorAll('.panel-tab').forEach(function(t) {
+      t.classList.remove('panel-tab--active');
+    });
+    document.getElementById('detail-content').querySelectorAll('.d-tab-panel').forEach(function(p) {
+      p.classList.remove('d-tab-panel--active');
+    });
+    btn.classList.add('panel-tab--active');
+    var el = document.getElementById(panelId);
+    if (el) el.classList.add('d-tab-panel--active');
   }
 
   function dSec(label, inner) {
     return '<div class="d-section"><div class="d-label">' + label + '</div>' + inner + '</div>';
   }
 
-  function aCard(label, value, color) {
+  function aCard(label, value, cls) {
     return '<div class="a-card"><div class="a-label">' + label + '</div>'
-      + '<div class="a-value" style="color:' + color + '">' + value + '</div></div>';
+      + '<div class="a-value a-value--' + cls + '">' + value + '</div></div>';
   }
 
   // ── Toast ──────────────────────────────────────────────────────
@@ -911,7 +1009,25 @@ _DASHBOARD_TEMPLATE = """\
   document.getElementById('detail-close').addEventListener('click', closeDetail);
   document.getElementById('detail-backdrop').addEventListener('click', closeDetail);
 
+  // ── Theme ──────────────────────────────────────────────────────
+  function toggleTheme() {
+    var cur = document.documentElement.getAttribute('data-theme') || 'light';
+    var next = cur === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('tf-theme', next);
+    updateThemeBtn(next);
+  }
+  function updateThemeBtn(theme) {
+    var btn = document.getElementById('theme-btn');
+    if (!btn) return;
+    btn.title = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+    btn.innerHTML = theme === 'dark'
+      ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>'
+      : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+  }
+
   connect();
+  updateThemeBtn(document.documentElement.getAttribute('data-theme') || 'light');
 </script>
 </body>
 </html>"""
