@@ -74,3 +74,57 @@ def test_tasks_list_populated_after_add_task():
     managed = ManagedBackgroundTasks(tm)
     managed.add_task(work)
     assert len(managed.tasks) == 1
+
+
+# ---------------------------------------------------------------------------
+# Idempotency key
+# ---------------------------------------------------------------------------
+
+
+def test_idempotency_key_dedup_returns_existing_task_id():
+    tm = TaskManager()
+
+    def work():
+        pass
+
+    managed = ManagedBackgroundTasks(tm)
+    id1 = managed.add_task(work, idempotency_key="op-1")
+    id2 = managed.add_task(work, idempotency_key="op-1")
+
+    assert id1 == id2
+    assert len(tm.store.list()) == 1
+
+
+def test_idempotency_key_allows_resubmit_after_failure():
+    tm = TaskManager()
+
+    def work():
+        pass
+
+    managed = ManagedBackgroundTasks(tm)
+    id1 = managed.add_task(work, idempotency_key="op-2")
+    tm.store.update(
+        id1,
+        status=__import__(
+            "fastapi_taskflow.models", fromlist=["TaskStatus"]
+        ).TaskStatus.FAILED,
+    )
+
+    id2 = managed.add_task(work, idempotency_key="op-2")
+    assert id1 != id2
+
+
+def test_idempotency_key_allows_resubmit_after_interrupted():
+    tm = TaskManager()
+
+    def work():
+        pass
+
+    managed = ManagedBackgroundTasks(tm)
+    id1 = managed.add_task(work, idempotency_key="op-3")
+    from fastapi_taskflow.models import TaskStatus
+
+    tm.store.update(id1, status=TaskStatus.INTERRUPTED)
+
+    id2 = managed.add_task(work, idempotency_key="op-3")
+    assert id1 != id2

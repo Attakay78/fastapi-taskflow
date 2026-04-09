@@ -25,6 +25,16 @@ backend = RedisBackend("redis://localhost:6379/0")
 task_manager = TaskManager(snapshot_backend=backend, snapshot_interval=30.0)
 ```
 
+## Multi-instance deployments
+
+When multiple instances share the same backend, completed task history is visible across all of them. Each instance flushes its completed tasks to the backend independently.
+
+SQLite works for multiple processes on the same host pointing to the same file. WAL journal mode is enabled automatically so concurrent writes do not conflict.
+
+Redis works across any number of instances on separate hosts. All instances read and write to the same Redis keys.
+
+See the [multi-instance guide](multi-instance.md) for deployment setup and load balancer configuration.
+
 ## How persistence works
 
 ```mermaid

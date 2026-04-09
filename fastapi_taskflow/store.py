@@ -64,6 +64,7 @@ class TaskStore:
         func_name: str,
         args: tuple,
         kwargs: dict,
+        idempotency_key: Optional[str] = None,
     ) -> TaskRecord:
         record = TaskRecord(
             task_id=task_id,
@@ -71,11 +72,23 @@ class TaskStore:
             status=TaskStatus.PENDING,
             args=args,
             kwargs=kwargs,
+            idempotency_key=idempotency_key,
         )
         with self._lock:
             self._tasks[task_id] = record
         self._notify_change()
         return record
+
+    def find_by_idempotency_key(self, key: str) -> Optional[TaskRecord]:
+        """Return the first active (non-failed, non-interrupted) task with the given idempotency key, or None."""
+        with self._lock:
+            for record in self._tasks.values():
+                if record.idempotency_key == key and record.status not in (
+                    TaskStatus.FAILED,
+                    TaskStatus.INTERRUPTED,
+                ):
+                    return record
+        return None
 
     def update(self, task_id: str, **fields) -> Optional[TaskRecord]:
         with self._lock:

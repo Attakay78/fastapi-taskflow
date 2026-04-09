@@ -49,4 +49,9 @@ __all__ = [
     "task_log",
 ]
 
-__version__ = "0.1.0"
+try:
+    from importlib.metadata import version as _version
+
+    __version__ = _version("fastapi-taskflow")
+except Exception:
+    __version__ = "unknown"

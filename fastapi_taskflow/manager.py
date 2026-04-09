@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import TYPE_CHECKING, Callable, Optional
 
 from .models import TaskConfig
@@ -12,6 +14,7 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
     from .backends.base import SnapshotBackend
+    from .models import TaskRecord
     from .wrapper import ManagedBackgroundTasks
 
 
@@ -45,9 +48,21 @@ class TaskManager:
         snapshot_backend: Optional["SnapshotBackend"] = None,
         snapshot_interval: float = 60.0,
         requeue_pending: bool = False,
+        merged_list_ttl: float = 5.0,
     ) -> None:
         self.registry = TaskRegistry()
         self.store = TaskStore()
+
+        # Cache for merged_list() backend reads.
+        # The in-memory store is always merged fresh; only the backend read
+        # (other instances' completed tasks) is cached to avoid a full DB/Redis
+        # read on every SSE event or dashboard request.
+        self._merged_list_ttl = merged_list_ttl
+        self._backend_cache: "list[TaskRecord]" = []
+        self._backend_cache_ts: float = 0.0
+        # Lock ensures concurrent callers wait for one refresh rather than
+        # all racing to call backend.load() simultaneously when the cache expires.
+        self._backend_cache_lock: asyncio.Lock | None = None
 
         self._scheduler = None
         if snapshot_backend is not None or snapshot_db is not None:
@@ -77,8 +92,21 @@ class TaskManager:
         backoff: float = 1.0,
         persist: bool = False,
         name: Optional[str] = None,
+        requeue_on_interrupt: bool = False,
     ) -> Callable:
-        """Decorator factory that registers a function with execution config."""
+        """Decorator factory that registers a function with execution config.
+
+        Args:
+            requeue_on_interrupt: When ``True`` and ``requeue_pending=True`` is
+                set on the :class:`TaskManager`, a task that was mid-execution
+                (``RUNNING``) at shutdown is saved as ``PENDING`` and re-executed
+                on the next startup.  Only set this for tasks whose function is
+                **idempotent** — i.e. safe to run from scratch even if it
+                partially executed before the crash (e.g. a pure DB sync).
+                When ``False`` (the default), interrupted tasks are saved to
+                history with status ``INTERRUPTED`` so they are visible in the
+                dashboard but are **not** re-executed automatically.
+        """
 
         def decorator(func: Callable) -> Callable:
             config = TaskConfig(
@@ -87,6 +115,7 @@ class TaskManager:
                 backoff=backoff,
                 persist=persist,
                 name=name or func.__name__,
+                requeue_on_interrupt=requeue_on_interrupt,
             )
             self.registry.register(func, config)
             return func
@@ -132,6 +161,50 @@ class TaskManager:
                 return {"task_id": task_id}
         """
         return self.get_tasks
+
+    async def merged_list(self) -> "list[TaskRecord]":
+        """
+        Return all known task records, merging the in-memory store with
+        completed records from the backend.
+
+        This gives a unified view across multiple instances sharing the same
+        backend (SQLite on the same host, or Redis):
+
+        * Live tasks (PENDING / RUNNING) only exist in the calling instance's
+          in-memory store — they are included as-is, always fresh.
+        * Completed tasks (SUCCESS / FAILED / INTERRUPTED) from **other**
+          instances are pulled from the backend and included.
+        * If the same task_id appears in both places the in-memory record
+          wins — it always has the most up-to-date status.
+
+        Falls back to ``store.list()`` when no backend is configured.
+
+        The backend read is cached for ``merged_list_ttl`` seconds (default 5s)
+        to avoid a full DB or Redis scan on every SSE event or dashboard refresh.
+        The in-memory merge always uses the latest live data regardless of cache.
+        """
+        live: dict[str, "TaskRecord"] = {t.task_id: t for t in self.store.list()}
+
+        if self._scheduler is None:
+            return list(live.values())
+
+        # Lazily create the lock inside the running event loop.
+        if self._backend_cache_lock is None:
+            self._backend_cache_lock = asyncio.Lock()
+
+        now = time.monotonic()
+        if now - self._backend_cache_ts > self._merged_list_ttl:
+            async with self._backend_cache_lock:
+                # Re-check inside the lock — a concurrent caller may have
+                # already refreshed the cache while we were waiting.
+                if time.monotonic() - self._backend_cache_ts > self._merged_list_ttl:
+                    self._backend_cache = await self._scheduler._backend.load()
+                    self._backend_cache_ts = time.monotonic()
+
+        merged: dict[str, "TaskRecord"] = {r.task_id: r for r in self._backend_cache}
+        # In-memory always wins — live status is more current than the snapshot.
+        merged.update(live)
+        return list(merged.values())
 
     def install(self, app: "FastAPI") -> None:
         """

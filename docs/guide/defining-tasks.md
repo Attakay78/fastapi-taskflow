@@ -21,6 +21,7 @@ Without any arguments, the task runs once with no retries.
 | `backoff` | `float` | `1.0` | Multiplier applied to `delay` on each retry. 1.0 = constant, 2.0 = exponential |
 | `persist` | `bool` | `False` | Mark this task for pending-state requeue on startup |
 | `name` | `str` | function name | Override the name stored in the registry and dashboard |
+| `requeue_on_interrupt` | `bool` | `False` | If the task was mid-execution at shutdown, save it as `PENDING` and requeue on next startup. Only use this on idempotent tasks. |
 
 ## Retry example
 
@@ -51,7 +52,11 @@ stateDiagram-v2
     RUNNING --> SUCCESS : function returned
     RUNNING --> FAILED : all retries exhausted
     RUNNING --> RUNNING : retry attempt
+    RUNNING --> INTERRUPTED : shutdown during execution (requeue_on_interrupt=False)
+    RUNNING --> PENDING : shutdown during execution (requeue_on_interrupt=True)
 ```
+
+`INTERRUPTED` tasks are visible in the dashboard and queryable via the API. They are not retried automatically. Use `INTERRUPTED` to identify tasks that need manual follow-up after an unclean shutdown.
 
 ## Unregistered functions
 

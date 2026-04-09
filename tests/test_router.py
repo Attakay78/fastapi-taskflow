@@ -97,3 +97,78 @@ def test_metrics_route_not_shadowed_by_task_id_route():
         resp = client.get("/tasks/metrics")
     assert resp.status_code == 200
     assert "total" in resp.json()
+
+
+def test_metrics_includes_interrupted():
+    app, tm = _build_app()
+    tm.store.create("x1", "dummy", (1,), {})
+    from fastapi_taskflow.models import TaskStatus
+
+    tm.store.update("x1", status=TaskStatus.INTERRUPTED)
+    with TestClient(app) as client:
+        data = client.get("/tasks/metrics").json()
+    assert data["interrupted"] == 1
+
+
+# ---------------------------------------------------------------------------
+# POST /tasks/{task_id}/retry
+# ---------------------------------------------------------------------------
+
+
+def test_retry_failed_task():
+    app, tm = _build_app()
+    from fastapi_taskflow.models import TaskStatus
+
+    tm.store.create("r1", "dummy", (1,), {})
+    tm.store.update("r1", status=TaskStatus.FAILED, error="boom")
+
+    with TestClient(app) as client:
+        resp = client.post("/tasks/r1/retry")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["task_id"] != "r1"
+    assert body["task"]["func_name"] == "dummy"
+
+
+def test_retry_interrupted_task():
+    app, tm = _build_app()
+    from fastapi_taskflow.models import TaskStatus
+
+    tm.store.create("r2", "dummy", (1,), {})
+    tm.store.update("r2", status=TaskStatus.INTERRUPTED)
+
+    with TestClient(app) as client:
+        resp = client.post("/tasks/r2/retry")
+
+    assert resp.status_code == 200
+    assert resp.json()["task_id"] != "r2"
+
+
+def test_retry_pending_task_returns_400():
+    app, _ = _build_app()
+    with TestClient(app) as client:
+        post_resp = client.post("/run")
+        task_id = post_resp.json()["task_id"]
+        resp = client.post(f"/tasks/{task_id}/retry")
+    assert resp.status_code == 400
+
+
+def test_retry_not_found_returns_404():
+    app, _ = _build_app()
+    with TestClient(app) as client:
+        resp = client.post("/tasks/no-such-task/retry")
+    assert resp.status_code == 404
+
+
+def test_retry_unregistered_function_returns_409():
+    app, tm = _build_app()
+    from fastapi_taskflow.models import TaskStatus
+
+    # Create a task for a function that is not in the registry
+    tm.store.create("r3", "ghost_func", (), {})
+    tm.store.update("r3", status=TaskStatus.FAILED)
+
+    with TestClient(app) as client:
+        resp = client.post("/tasks/r3/retry")
+    assert resp.status_code == 409

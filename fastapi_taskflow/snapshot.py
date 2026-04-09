@@ -115,8 +115,38 @@ class SnapshotScheduler:
 
         from .executor import execute_task
 
+        # Load completed history task_ids once so we can skip tasks that
+        # already succeeded before the crash (Scenario A crash recovery).
+        history_records = await self._backend.load()
+        completed_ids = {
+            r.task_id for r in history_records if r.status.value == "success"
+        }
+
         dispatched = 0
         for record in records:
+            # Skip tasks that completed successfully before the crash —
+            # they were flushed to history but not yet removed from pending.
+            if record.task_id in completed_ids:
+                logger.info(
+                    "fastapi-taskflow: skipping requeue of task %s (%s) — "
+                    "already completed successfully.",
+                    record.task_id,
+                    record.func_name,
+                )
+                continue
+
+            # Atomically claim the task so only one instance dispatches it.
+            # Backends that share state (SQLite same-host, Redis) delete the
+            # pending record here; the default no-op returns True for custom
+            # backends that don't implement atomic claiming.
+            claimed = await self._backend.claim_pending(record.task_id)
+            if not claimed:
+                logger.debug(
+                    "fastapi-taskflow: task %s already claimed by another instance, skipping.",
+                    record.task_id,
+                )
+                continue
+
             result = self._task_manager.registry.get_by_name(record.func_name)
             if result is None:
                 logger.warning(
@@ -140,6 +170,7 @@ class SnapshotScheduler:
                     self._task_manager.store,
                     record.args,
                     record.kwargs,
+                    backend=self._backend,
                 )
             )
             dispatched += 1
@@ -149,6 +180,9 @@ class SnapshotScheduler:
                 record.func_name,
             )
 
+        # clear_pending is now a safety net — backends with atomic claim_pending
+        # already deleted each record individually above. For custom backends
+        # using the default no-op claim_pending this clears the full list.
         await self._backend.clear_pending()
         return dispatched
 
@@ -172,17 +206,40 @@ class SnapshotScheduler:
             return 0
         return await self._backend.save(completed)
 
+    async def flush_one(self, task_id: str) -> None:
+        """
+        Immediately persist a single completed task to the backend.
+
+        Called by the executor right after a task transitions to SUCCESS so
+        that a crash between SUCCESS and the next periodic flush does not
+        cause the task to be re-executed on restart.
+        """
+        record = self._task_manager.store.get(task_id)
+        if record is not None:
+            await self._backend.save([record])
+
     async def flush_pending(self) -> int:
         """
-        Persist all unfinished tasks (``pending`` and ``running``) so they
-        can be requeued on next startup.  Tasks in ``running`` state are
-        saved as ``pending`` because they did not complete cleanly.
+        Persist all unfinished tasks at shutdown so they can be handled on
+        next startup.  Only called when ``requeue_pending=True``.
 
-        Only called when ``requeue_pending=True``.
+        ``PENDING`` tasks (never started) are always saved for requeue.
+
+        ``RUNNING`` tasks (mid-execution at shutdown) are treated based on
+        their registered ``requeue_on_interrupt`` flag:
+
+        - ``requeue_on_interrupt=True`` — saved as ``PENDING`` for requeue.
+          Only set this on idempotent tasks that are safe to restart from
+          scratch even if they partially executed.
+        - ``requeue_on_interrupt=False`` (default) — saved to the **history**
+          backend as ``INTERRUPTED`` so they are visible in the dashboard but
+          are **not** re-executed automatically.
 
         Returns:
-            Number of records saved.
+            Number of records saved to the pending store.
         """
+        from datetime import datetime
+
         from .models import TaskStatus
 
         unfinished = [
@@ -193,12 +250,39 @@ class SnapshotScheduler:
         if not unfinished:
             return 0
 
-        # Normalise running → pending so they are retried from scratch.
-        for t in unfinished:
-            if t.status == TaskStatus.RUNNING:
-                self._task_manager.store.update(t.task_id, status=TaskStatus.PENDING)
+        to_requeue = []
+        to_interrupt = []
 
-        return await self._backend.save_pending(unfinished)
+        for t in unfinished:
+            if t.status == TaskStatus.PENDING:
+                to_requeue.append(t)
+            else:
+                # RUNNING — check whether the task opted in to requeue on interrupt
+                result = self._task_manager.registry.get_by_name(t.func_name)
+                requeue_safe = result[1].requeue_on_interrupt if result else False
+
+                if requeue_safe:
+                    self._task_manager.store.update(
+                        t.task_id, status=TaskStatus.PENDING
+                    )
+                    to_requeue.append(t)
+                else:
+                    # Mark as INTERRUPTED in the store and flush to history so
+                    # it's visible in the dashboard but will not be re-executed.
+                    self._task_manager.store.update(
+                        t.task_id,
+                        status=TaskStatus.INTERRUPTED,
+                        end_time=datetime.utcnow(),
+                    )
+                    to_interrupt.append(t)
+
+        if to_interrupt:
+            await self._backend.save(to_interrupt)
+
+        if not to_requeue:
+            return 0
+
+        return await self._backend.save_pending(to_requeue)
 
     # ------------------------------------------------------------------
     # Background loop

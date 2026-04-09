@@ -77,6 +77,40 @@ class SnapshotBackend(ABC):
         they are not re-dispatched on subsequent restarts.
         """
 
+    async def claim_pending(self, task_id: str) -> bool:
+        """
+        Atomically claim a single pending task for execution.
+
+        Deletes the task from the pending store and returns ``True`` if this
+        caller is the one that deleted it, ``False`` if another instance
+        already claimed it (i.e. the record was already gone).
+
+        The default implementation always returns ``True`` — custom backends
+        that do not override this method retain the original behaviour where
+        every instance that loaded the pending list will dispatch all tasks.
+        Override this in backends that share state across instances (SQLite
+        same-host, Redis) to prevent duplicate execution on restart.
+        """
+        return True
+
+    async def check_idempotency_key(self, key: str) -> "str | None":
+        """
+        Return the ``task_id`` previously recorded for *key*, or ``None``.
+
+        Called before executing a task that carries an idempotency key.
+        The default no-op means idempotency key cross-instance dedup is
+        only active when a backend overrides this method.
+        """
+        return None
+
+    async def record_idempotency_key(self, key: str, task_id: str) -> None:
+        """
+        Persist *key* → *task_id* after a task completes successfully.
+
+        The default is a no-op.  Override in backends to enable cross-instance
+        idempotency key dedup.
+        """
+
     @abstractmethod
     async def close(self) -> None:
         """Release any held resources (connections, file handles, …)."""

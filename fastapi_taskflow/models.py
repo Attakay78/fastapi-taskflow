@@ -9,6 +9,7 @@ class TaskStatus(str, Enum):
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
+    INTERRUPTED = "interrupted"
 
 
 @dataclass
@@ -18,6 +19,7 @@ class TaskConfig:
     backoff: float = 1.0  # multiplier applied to delay on each retry
     persist: bool = False
     name: str | None = None
+    requeue_on_interrupt: bool = False
 
 
 @dataclass
@@ -34,6 +36,7 @@ class TaskRecord:
     error: str | None = None
     logs: list[str] = field(default_factory=list)
     stacktrace: str | None = None
+    idempotency_key: str | None = None
 
     @property
     def duration(self) -> float | None:

@@ -3,14 +3,14 @@
 </p>
 <p align="center">
   <strong>Turn FastAPI BackgroundTasks into a production-ready task system.</strong><br/>
-  Retries, control, and visibility without workers or brokers.
+  Retries, control, resiliency and visibility without workers or brokers.
 </p>
 
 ---
 
 FastAPI's `BackgroundTasks` handles simple fire-and-forget work well. But in real applications you quickly hit the same gaps: tasks fail silently, you have no visibility into what ran, and nothing survives a restart.
 
-fastapi-taskflow is a thin layer on top of what you already have. It does not compete with Celery, ARQ, Taskiq, or Dramatiq. It is built for teams who are already using FastAPI's native background tasks and want retries, status tracking, and a live dashboard without adding infrastructure.
+fastapi-taskflow is a thin layer on top of what you already have. It does not compete with Celery, ARQ, Taskiq, or Dramatiq. It is built for teams who are already using FastAPI's native background tasks and want retries, resilience, status tracking, and a live dashboard without adding infrastructure.
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/Attakay78/fastapi-taskflow/main/docs/assets/images/dashboard.png" target="_blank">
@@ -29,10 +29,13 @@ fastapi-taskflow is a thin layer on top of what you already have. It does not co
 ## Features
 
 - Automatic retries with configurable delay and exponential backoff
-- Task IDs and full lifecycle tracking: `PENDING`, `RUNNING`, `SUCCESS`, `FAILED`
+- Task IDs and full lifecycle tracking: `PENDING`, `RUNNING`, `SUCCESS`, `FAILED`, `INTERRUPTED`
 - Live admin dashboard over SSE at `/tasks/dashboard`
 - SQLite persistence out of the box, Redis as an optional extra
 - Pending task requeue: unfinished tasks at shutdown are re-dispatched on startup
+- `requeue_on_interrupt`: opt-in requeue for idempotent tasks interrupted mid-execution
+- Idempotency keys: prevent duplicate execution of the same logical operation
+- Multi-instance support: atomic requeue claiming, shared task history across instances
 - Zero-migration injection: keep your existing `BackgroundTasks` annotations
 - Both sync and async task functions supported
 
@@ -113,6 +116,17 @@ def route(tasks=Depends(task_manager.get_tasks)):
 | `backoff` | `float` | `1.0` | Multiplier applied to `delay` on each retry |
 | `persist` | `bool` | `False` | Save this task for requeue on restart |
 | `name` | `str` | function name | Override the name shown in the dashboard |
+| `requeue_on_interrupt` | `bool` | `False` | Requeue this task if it was mid-execution at shutdown. Only set for idempotent tasks. |
+
+## Idempotency keys
+
+Pass an `idempotency_key` to `add_task()` to prevent the same logical operation from running twice. If a non-failed task with the same key already exists, the original `task_id` is returned and the task is not enqueued again.
+
+```python
+task_id = tasks.add_task(send_notification, order_id, idempotency_key="order-42-notified")
+```
+
+Useful for handling retried HTTP requests, duplicate webhook deliveries, or double-clicks.
 
 ## API endpoints
 
@@ -122,10 +136,35 @@ def route(tasks=Depends(task_manager.get_tasks)):
 | `GET` | `/tasks/{task_id}` | Single task detail |
 | `GET` | `/tasks/metrics` | Aggregated stats |
 | `GET` | `/tasks/dashboard` | Live HTML dashboard |
+| `POST` | `/tasks/{task_id}/retry` | Retry a failed or interrupted task |
+
+## Multi-instance deployments
+
+fastapi-taskflow supports running multiple instances behind a load balancer when a shared backend is configured.
+
+**Same host, multiple processes** -- use SQLite. All instances share the same file. Requeue claiming is atomic so only one instance picks up each task on restart.
+
+**Multiple hosts** -- use Redis. All instances share the same Redis instance. Idempotency keys, requeue claiming, and completed task history all work across hosts.
+
+```python
+from fastapi_taskflow.backends import RedisBackend
+
+task_manager = TaskManager(
+    snapshot_backend=RedisBackend("redis://localhost:6379/0"),
+    requeue_pending=True,
+)
+```
+
+**Dashboard in multi-instance deployments** -- the dashboard shows live tasks for the instance it is connected to. Completed tasks from all instances are visible via the shared backend (with a short cache window). For accurate live task visibility, route dashboard traffic to a single instance using sticky sessions at the load balancer. See the [multi-instance guide](docs/guide/multi-instance.md) for examples.
+
+**Known caveats:**
+- Live `PENDING` and `RUNNING` tasks from other instances are not visible in real time. Each instance only holds its own in-memory state.
+- SQLite multi-instance only works when all processes share the same file path on the same host. It does not work across separate machines.
+- Tasks in `RUNNING` state at the time of a hard crash (SIGKILL, OOM) cannot be recovered. Only clean shutdowns trigger the pending store write.
 
 ## What this is not
 
-This is not a distributed task queue. If you need tasks to run on separate workers, survive across multiple app instances, or integrate with a message broker, use Celery, ARQ, Taskiq, or a similar tool. This library is for in-process background work that needs more control than the bare `BackgroundTasks` provides.
+fastapi-taskflow does not compete with Celery, ARQ, Taskiq, or Dramatiq. Those tools are built for distributed workers, message brokers, and high-throughput task routing. This library is for teams using FastAPI's native `BackgroundTasks` who want retries, visibility, and resilience without adding worker infrastructure.
 
 ## License
 

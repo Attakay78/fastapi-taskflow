@@ -44,6 +44,14 @@ CREATE TABLE IF NOT EXISTS task_pending_requeue (
 )
 """
 
+_CREATE_IDEMPOTENCY = """
+CREATE TABLE IF NOT EXISTS task_idempotency_keys (
+    idem_key    TEXT PRIMARY KEY,
+    task_id     TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+)
+"""
+
 # Migrations applied to databases created before a column existed.
 _MIGRATIONS = [
     "ALTER TABLE task_snapshots ADD COLUMN args_json TEXT",
@@ -100,8 +108,13 @@ class SqliteBackend(SnapshotBackend):
 
     def _init_db(self) -> None:
         with sqlite3.connect(self._db_path) as conn:
+            # WAL mode allows concurrent readers alongside one writer — much
+            # safer than the default exclusive-lock mode when multiple processes
+            # (e.g. two app instances) share the same SQLite file on the same host.
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(_CREATE_HISTORY)
             conn.execute(_CREATE_PENDING)
+            conn.execute(_CREATE_IDEMPOTENCY)
             for migration in _MIGRATIONS:
                 try:
                     conn.execute(migration)
@@ -184,6 +197,31 @@ class SqliteBackend(SnapshotBackend):
         with sqlite3.connect(self._db_path) as conn:
             conn.execute("DELETE FROM task_pending_requeue")
 
+    def _claim_pending_sync(self, task_id: str) -> bool:
+        """Atomically delete one pending row. Returns True if we deleted it."""
+        with sqlite3.connect(self._db_path) as conn:
+            cur = conn.execute(
+                "DELETE FROM task_pending_requeue WHERE task_id = ?", (task_id,)
+            )
+            return cur.rowcount == 1
+
+    def _check_idempotency_key_sync(self, key: str) -> "str | None":
+        with sqlite3.connect(self._db_path) as conn:
+            row = conn.execute(
+                "SELECT task_id FROM task_idempotency_keys WHERE idem_key = ?", (key,)
+            ).fetchone()
+        return row[0] if row else None
+
+    def _record_idempotency_key_sync(self, key: str, task_id: str) -> None:
+        from datetime import datetime
+
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO task_idempotency_keys (idem_key, task_id, created_at)"
+                " VALUES (?, ?, ?)",
+                (key, task_id, datetime.utcnow().isoformat()),
+            )
+
     def _load_sync(self) -> "list[TaskRecord]":
         from ..models import TaskRecord, TaskStatus
 
@@ -242,6 +280,15 @@ class SqliteBackend(SnapshotBackend):
 
     async def clear_pending(self) -> None:
         await asyncio.to_thread(self._clear_pending_sync)
+
+    async def claim_pending(self, task_id: str) -> bool:
+        return await asyncio.to_thread(self._claim_pending_sync, task_id)
+
+    async def check_idempotency_key(self, key: str) -> "str | None":
+        return await asyncio.to_thread(self._check_idempotency_key_sync, key)
+
+    async def record_idempotency_key(self, key: str, task_id: str) -> None:
+        await asyncio.to_thread(self._record_idempotency_key_sync, key, task_id)
 
     async def close(self) -> None:
         pass  # SQLite connections are opened/closed per-operation

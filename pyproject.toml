@@ -1,11 +1,11 @@
 [project]
 name = "fastapi-taskflow"
-version = "0.2.0"
-description = "Turn FastAPI BackgroundTasks into a production-ready task system. Retries, control, and visibility without workers or brokers."
+version = "0.3.0"
+description = "Turn FastAPI BackgroundTasks into a production-ready task system. Retries, control, resiliency and visibility without workers or brokers."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-keywords = ["fastapi", "background-tasks", "task-manager", "retries", "observability", "tasks management"]
+keywords = ["fastapi", "background-tasks", "task-manager", "retries", "observability", "tasks management", "task-schedular"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

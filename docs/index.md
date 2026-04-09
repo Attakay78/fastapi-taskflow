@@ -6,7 +6,7 @@ hide:
 
 <div class="hero">
   <h1>Turn <span class="hero-accent">FastAPI BackgroundTasks</span> into a production-ready task system</h1>
-  <p class="sub">Retries, control, and visibility without workers or brokers.</p>
+  <p class="sub">Retries, control, resiliency and visibility without workers or brokers.</p>
   <div class="hero-actions">
     <a class="btn btn-primary" href="getting-started/installation/">Get Started</a>
     <a class="btn btn-secondary" href="getting-started/quickstart/">Quick Start</a>
@@ -142,7 +142,7 @@ def signup(email: str, background_tasks: BackgroundTasks):
   <div class="feature-card">
     <span class="icon">⟳</span>
     <h3>Pending Requeue</h3>
-    <p>Tasks that did not finish before shutdown are saved and re-dispatched automatically on next startup.</p>
+    <p>Tasks that did not finish before shutdown are saved and re-dispatched on next startup. Tasks interrupted mid-execution are marked INTERRUPTED or requeued based on a per-task flag.</p>
   </div>
 
   <div class="feature-card">
@@ -157,14 +157,27 @@ def signup(email: str, background_tasks: BackgroundTasks):
     <p>Call <code>task_log()</code> inside any task to capture timestamped log entries. Logs and full stack traces appear in the dashboard detail panel.</p>
   </div>
 
+  <div class="feature-card">
+    <span class="icon">◈</span>
+    <h3>Idempotency Keys</h3>
+    <p>Pass an <code>idempotency_key</code> to <code>add_task()</code> to prevent the same logical operation from running twice, even across multiple instances.</p>
+  </div>
+
+  <div class="feature-card">
+    <span class="icon">⊕</span>
+    <h3>Multi-Instance Support</h3>
+    <p>Run multiple instances behind a load balancer with SQLite (same host) or Redis (any host). Requeue claiming is atomic. Task history is shared across all instances.</p>
+  </div>
+
   </div>
 </div>
 
 <div class="note-section">
   <p class="section-label">Positioning</p>
   <p class="section-title">Not a Celery replacement</p>
-  <p>fastapi-taskflow does not compete with Celery, ARQ, Taskiq, or Dramatiq. Those tools are built for distributed systems, message brokers, and multi-worker setups.</p>
-  <p>This library is for teams already using FastAPI's native <code>BackgroundTasks</code> for lightweight in-process work who want retries, visibility, and persistence without adding infrastructure. If your tasks need to survive across multiple app instances or run on separate workers, use a proper task queue.</p>
+  <p>fastapi-taskflow does not compete with Celery, ARQ, Taskiq, or Dramatiq. Those tools are built for distributed workers, message brokers, and high-throughput task routing across separate machines.</p>
+  <p>This library is for teams using FastAPI's native <code>BackgroundTasks</code> who want retries, visibility, and resilience without adding worker infrastructure. It supports multi-instance deployments with a shared SQLite file (same host) or Redis (any host), including atomic requeue claiming, idempotency keys, and shared task history across instances.</p>
+  <p>If your tasks need to run on dedicated worker processes completely separate from your web application, use a proper task queue.</p>
   <p><a href="getting-started/installation/">Get started &rarr;</a></p>
 </div>
 

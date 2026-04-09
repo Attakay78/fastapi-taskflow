@@ -289,6 +289,35 @@ class RedisBackend(SnapshotBackend):
         pipe.delete(self._pending_index_key())
         await pipe.execute()
 
+    async def claim_pending(self, task_id: str) -> bool:
+        """Atomically delete the pending hash for task_id.
+
+        Returns True if this caller deleted it (i.e. we own the task),
+        False if another instance already claimed it.
+        """
+        client = self._get_client()
+        pipe = client.pipeline()
+        pipe.delete(self._pending_key(task_id))
+        pipe.srem(self._pending_index_key(), task_id)
+        results = await pipe.execute()
+        # results[0] = number of keys deleted (1 if we got it, 0 if already gone)
+        return results[0] == 1
+
+    def _idem_key(self, key: str) -> str:
+        return f"{self._prefix}:idem:{key}"
+
+    async def check_idempotency_key(self, key: str) -> "str | None":
+        client = self._get_client()
+        value = await client.get(self._idem_key(key))
+        if value is None:
+            return None
+        return value.decode() if isinstance(value, bytes) else value
+
+    async def record_idempotency_key(self, key: str, task_id: str) -> None:
+        client = self._get_client()
+        # NX = only set if not already recorded (first writer wins)
+        await client.set(self._idem_key(key), task_id, nx=True)
+
     async def close(self) -> None:
         if self._client is not None:
             await self._client.aclose()

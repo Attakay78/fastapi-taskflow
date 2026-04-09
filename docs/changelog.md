@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.3.0
+
+Adds resilience and multi-instance support.
+
+### Resilience
+
+- Added `INTERRUPTED` status for tasks that were mid-execution at shutdown. They are saved to history and visible in the dashboard but not re-executed automatically.
+- Added `requeue_on_interrupt=True` on `@task_manager.task()` for idempotent tasks that are safe to restart from scratch.
+- Completed tasks are flushed to the backend immediately on `SUCCESS`, closing the crash recovery gap between completion and the next periodic flush.
+
+### Idempotency
+
+- `add_task()` accepts an optional `idempotency_key`. If a non-failed task with the same key exists, the original `task_id` is returned and the task is not run again. Works in-process and cross-instance via the shared backend.
+
+### Multi-instance
+
+- Requeue claiming is now atomic per task (SQLite `DELETE` rowcount, Redis `HDEL`). Only one instance dispatches each pending task on startup.
+- `SqliteBackend` enables WAL mode for safer concurrent multi-process access.
+- Dashboard merges completed task history from all instances via the shared backend, with a cached backend read (default 5s TTL) to avoid excess I/O.
+- Added `poll_interval` on `TaskAdmin` (default 30s) to control how often the SSE stream refreshes from the backend for cross-instance updates.
+
+### Task retry
+
+- Added `POST /tasks/{task_id}/retry` endpoint. Re-enqueues a `failed` or `interrupted` task using the original function, args, and kwargs. Returns a new task record with a fresh task ID. The original record is left unchanged in history.
+- The dashboard detail panel shows a retry button for failed and interrupted tasks. Interrupted tasks include a warning that the function may have already partially executed.
+- Returns `400` if the task status does not allow retry, `404` if not found, and `409` if the function is no longer registered in the process.
+
+### Dashboard
+
+- Added time-range filter (last 1h, 6h, 24h, 7d). Filter and sort preferences are persisted in `localStorage`.
+- Added pause/resume button. While paused, incoming SSE events are buffered and a badge shows how many new tasks arrived. Resuming applies the latest state immediately. Pause state survives page reloads.
+- Added bulk retry. Checkboxes appear on failed and interrupted rows. A toolbar shows the selection count and a single Retry button dispatches all selected tasks in parallel.
+- `interrupted` tasks now have a dedicated amber status badge and metrics card.
+
+---
+
 ## v0.2.0
 
 ### Task logging

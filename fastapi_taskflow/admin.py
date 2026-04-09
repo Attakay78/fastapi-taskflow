@@ -56,6 +56,7 @@ class TaskAdmin:
         auth: _AuthParam = None,
         token_expiry: int = 86400,
         secret_key: str | None = None,
+        poll_interval: float = 30.0,
     ) -> None:
         self._task_manager = task_manager
 
@@ -90,6 +91,7 @@ class TaskAdmin:
                 display_func_args=display_func_args,
                 secret_key=resolved_secret,
                 login_path=f"{path}/auth/login" if backend is not None else None,
+                poll_interval=poll_interval,
             )
         )
         app.include_router(

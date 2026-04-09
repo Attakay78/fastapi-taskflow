@@ -1,5 +1,5 @@
 site_name: FastAPI-TaskFlow
-site_description: Retries, control, and visibility without workers or brokers
+site_description: Retries, control, resiliency and visibility without workers or brokers
 site_url: https://attakay78.github.io/fastapi-taskflow/
 repo_url: https://github.com/Attakay78/fastapi-taskflow
 repo_name: fastapi-taskflow
@@ -73,6 +73,7 @@ nav:
     - Custom Backends: guide/backends.md
     - Dashboard: guide/dashboard.md
     - Authentication: guide/authentication.md
+    - Multi-Instance Deployments: guide/multi-instance.md
   - API Reference:
     - TaskManager: api/task-manager.md
     - TaskAdmin: api/task-admin.md

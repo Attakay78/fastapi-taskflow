@@ -200,20 +200,51 @@ async def test_flush_pending_saves_unfinished_tasks(tmp_path):
     assert records[0].kwargs == {"x": 1}
 
 
-async def test_flush_pending_normalises_running_to_pending(tmp_path):
+async def test_flush_pending_running_without_flag_becomes_interrupted(tmp_path):
+    """RUNNING tasks without requeue_on_interrupt=True are saved as INTERRUPTED, not requeued."""
     db = str(tmp_path / "tasks.db")
     tm = TaskManager()
+
+    @tm.task()
+    def work() -> None:
+        pass
+
     s = SnapshotScheduler(tm, db_path=db, interval=9999, requeue_pending=True)
 
     tm.store.create("r1", "work", (), {})
     tm.store.update("r1", status=TaskStatus.RUNNING)
 
-    await s.flush_pending()
+    count = await s.flush_pending()
 
-    # Store record should be normalised to PENDING
-    assert tm.store.get("r1").status == TaskStatus.PENDING
-    records = await s._backend.load_pending()
-    assert records[0].status == TaskStatus.PENDING
+    # Not added to pending store — should not be requeued
+    assert count == 0
+    pending = await s._backend.load_pending()
+    assert not any(r.task_id == "r1" for r in pending)
+
+    # Should be in history as INTERRUPTED
+    assert tm.store.get("r1").status == TaskStatus.INTERRUPTED
+
+
+async def test_flush_pending_running_with_flag_requeued_as_pending(tmp_path):
+    """RUNNING tasks with requeue_on_interrupt=True are saved as PENDING and requeued."""
+    db = str(tmp_path / "tasks.db")
+    tm = TaskManager()
+
+    @tm.task(requeue_on_interrupt=True)
+    def idempotent_work() -> None:
+        pass
+
+    s = SnapshotScheduler(tm, db_path=db, interval=9999, requeue_pending=True)
+
+    tm.store.create("r2", "idempotent_work", (), {})
+    tm.store.update("r2", status=TaskStatus.RUNNING)
+
+    count = await s.flush_pending()
+
+    assert count == 1
+    assert tm.store.get("r2").status == TaskStatus.PENDING
+    pending = await s._backend.load_pending()
+    assert any(r.task_id == "r2" for r in pending)
 
 
 async def test_requeue_dispatches_and_clears(tmp_path):
