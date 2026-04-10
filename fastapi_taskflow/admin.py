@@ -106,6 +106,9 @@ class TaskAdmin:
             app.router.on_startup.append(self._on_startup)
             app.router.on_shutdown.append(self._on_shutdown)
 
+        if task_manager.file_logger is not None:
+            app.router.on_shutdown.append(self._close_file_logger)
+
     async def _on_startup(self) -> None:
         scheduler = self._task_manager._scheduler
         assert scheduler is not None
@@ -121,3 +124,7 @@ class TaskAdmin:
         await scheduler.flush()
         if scheduler._requeue_pending:
             await scheduler.flush_pending()
+
+    async def _close_file_logger(self) -> None:
+        if self._task_manager.file_logger is not None:
+            self._task_manager.file_logger.close()

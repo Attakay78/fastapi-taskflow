@@ -49,9 +49,26 @@ class TaskManager:
         snapshot_interval: float = 60.0,
         requeue_pending: bool = False,
         merged_list_ttl: float = 5.0,
+        log_file: Optional[str] = None,
+        log_file_max_bytes: int = 10 * 1024 * 1024,
+        log_file_backup_count: int = 5,
+        log_file_mode: str = "rotate",
+        log_lifecycle: bool = False,
     ) -> None:
         self.registry = TaskRegistry()
         self.store = TaskStore()
+
+        self.file_logger = None
+        if log_file is not None:
+            from .file_logger import TaskFileLogger
+
+            self.file_logger = TaskFileLogger(
+                log_file,
+                max_bytes=log_file_max_bytes,
+                backup_count=log_file_backup_count,
+                mode=log_file_mode,  # type: ignore[arg-type]
+                log_lifecycle=log_lifecycle,
+            )
 
         # Cache for merged_list() backend reads.
         # The in-memory store is always merged fresh; only the backend read

@@ -68,6 +68,7 @@ nav:
     - Defining Tasks: guide/defining-tasks.md
     - Injection Patterns: guide/injection.md
     - Task Logging: guide/logging.md
+    - File Logging: guide/file-logging.md
     - Persistence: guide/persistence.md
     - Pending Requeue: guide/requeue.md
     - Custom Backends: guide/backends.md
@@ -79,6 +80,7 @@ nav:
     - TaskAdmin: api/task-admin.md
     - ManagedBackgroundTasks: api/managed-background-tasks.md
     - task_log: api/task-log.md
+    - TaskFileLogger: api/task-file-logger.md
     - Models: api/models.md
     - Backends: api/backends.md
   - Changelog: changelog.md

@@ -10,6 +10,7 @@ from .task_logging import _reset_sink, _set_sink
 
 if TYPE_CHECKING:
     from .backends.base import SnapshotBackend
+    from .file_logger import TaskFileLogger
 
 
 async def execute_task(
@@ -21,6 +22,7 @@ async def execute_task(
     kwargs: dict,
     backend: "Optional[SnapshotBackend]" = None,
     on_success: "Optional[Callable]" = None,
+    file_logger: "Optional[TaskFileLogger]" = None,
 ) -> None:
     """
     Run *func* inside the execution lifecycle:
@@ -38,8 +40,12 @@ async def execute_task(
             the task transitions to SUCCESS.  Used by the snapshot scheduler
             to persist the record immediately so a post-success crash does
             not cause re-execution on restart.
+        file_logger: Optional :class:`~fastapi_taskflow.file_logger.TaskFileLogger`
+            instance.  When provided, every :func:`task_log` entry and retry
+            separator is also written to the configured text file.
     """
     record = store.get(task_id)
+    func_name = func.__name__
 
     # Cross-instance idempotency key check: if this task carries an
     # idempotency key, ask the shared backend whether another instance
@@ -58,9 +64,14 @@ async def execute_task(
             return
 
     store.update(task_id, status=TaskStatus.RUNNING, start_time=datetime.utcnow())
+    if file_logger is not None:
+        file_logger.lifecycle(task_id, func_name, "RUNNING")
 
-    # Closure bound once — executor decides what to do with each message.
-    sink = lambda msg: store.append_log(task_id, msg)  # noqa: E731
+    # Compose sink: write to in-memory store and optionally to the log file.
+    def sink(msg: str) -> None:
+        store.append_log(task_id, msg)
+        if file_logger is not None:
+            file_logger.write(task_id, func_name, msg)
 
     delay = config.delay
     last_error: Exception | None = None
@@ -71,7 +82,10 @@ async def execute_task(
             await asyncio.sleep(delay)
             delay *= config.backoff
             store.update(task_id, retries_used=attempt)
-            store.append_log(task_id, f"--- Retry {attempt} ---")
+            separator = f"--- Retry {attempt} ---"
+            store.append_log(task_id, separator)
+            if file_logger is not None:
+                file_logger.write(task_id, func_name, separator)
 
         token = _set_sink(sink)
         try:
@@ -85,6 +99,8 @@ async def execute_task(
                 status=TaskStatus.SUCCESS,
                 end_time=datetime.utcnow(),
             )
+            if file_logger is not None:
+                file_logger.lifecycle(task_id, func_name, "SUCCESS")
             # Immediately persist to backend so a crash between now and the
             # next periodic flush does not cause this task to be re-executed.
             if on_success is not None:
@@ -111,6 +127,8 @@ async def execute_task(
         error=str(last_error),
         stacktrace=last_tb,
     )
+    if file_logger is not None:
+        file_logger.lifecycle(task_id, func_name, "FAILED")
 
 
 def make_background_func(
@@ -122,6 +140,7 @@ def make_background_func(
     kwargs: dict,
     backend: "Optional[SnapshotBackend]" = None,
     on_success: "Optional[Callable]" = None,
+    file_logger: "Optional[TaskFileLogger]" = None,
 ) -> Callable:
     """Return a zero-argument async callable suitable for BackgroundTasks.add_task."""
 
@@ -135,6 +154,7 @@ def make_background_func(
             kwargs,
             backend=backend,
             on_success=on_success,
+            file_logger=file_logger,
         )
 
     _wrapped.__name__ = f"_bg_{func.__name__}_{task_id[:8]}"

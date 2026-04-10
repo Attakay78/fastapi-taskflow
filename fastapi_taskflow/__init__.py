@@ -28,6 +28,7 @@ Quick start::
 from .admin import TaskAdmin
 from .auth import TaskAuthBackend
 from .backends import RedisBackend, SnapshotBackend, SqliteBackend
+from .file_logger import TaskFileLogger
 from .manager import TaskManager
 from .models import TaskConfig, TaskRecord, TaskStatus
 from .snapshot import SnapshotScheduler
@@ -46,6 +47,7 @@ __all__ = [
     "SnapshotBackend",
     "SqliteBackend",
     "RedisBackend",
+    "TaskFileLogger",
     "task_log",
 ]
 

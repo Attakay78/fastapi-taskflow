@@ -130,6 +130,7 @@ def create_router(
             record.kwargs,
             backend=backend,
             on_success=on_success,
+            file_logger=task_manager.file_logger,
         )
 
         # Schedule via asyncio directly since we have no BackgroundTasks instance here.

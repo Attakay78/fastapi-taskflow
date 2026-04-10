@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.4.0
+
+### File logging
+
+- Added `log_file` parameter to `TaskManager`. When set, every `task_log()` call and retry separator is written to a plain text file in addition to being stored on the task record.
+- Each line has the format `[task_id] [func_name] 2024-01-01T12:00:00 message`.
+- `log_lifecycle=True` writes an additional line for each status transition (`RUNNING`, `SUCCESS`, `FAILED`, `INTERRUPTED`).
+- Automatic rotation via `RotatingFileHandler` (default). External rotation via `WatchedFileHandler` with `log_file_mode="watched"`.
+- For same-host multi-process deployments, use separate files per instance or `log_file_mode="watched"` with logrotate. For multi-host Redis deployments, each host writes its own file.
+
+---
+
 ## v0.3.0
 
 Adds resilience and multi-instance support.

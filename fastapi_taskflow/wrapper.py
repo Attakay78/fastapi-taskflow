@@ -103,6 +103,7 @@ class ManagedBackgroundTasks(BackgroundTasks):
             kwargs,
             backend=backend,
             on_success=on_success,
+            file_logger=self._task_manager.file_logger,
         )
 
         super().add_task(wrapped)  # appends to self.tasks (shared with native if set)

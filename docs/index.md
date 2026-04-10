@@ -19,7 +19,7 @@ hide:
   <div class="problem-header">
     <p class="section-label">The problem</p>
     <p class="section-title">BackgroundTasks is fine, until it isn't</p>
-    <p class="problem-desc">FastAPI's <code>BackgroundTasks</code> is great for simple work. But in production you hit the same gaps fast, tasks fail silently, nothing is tracked, and restarts wipe all state.</p>
+    <p class="problem-desc">FastAPI's <a href="https://fastapi.tiangolo.com/tutorial/background-tasks/" target="_blank"><code>BackgroundTasks</code></a> is great for simple work. But in production you hit the same gaps fast, tasks fail silently, nothing is tracked, and restarts wipe all state.</p>
   </div>
   <div class="compare-grid">
     <div class="compare-col before">
@@ -155,6 +155,12 @@ def signup(email: str, background_tasks: BackgroundTasks):
     <span class="icon">≡</span>
     <h3>Task Logging</h3>
     <p>Call <code>task_log()</code> inside any task to capture timestamped log entries. Logs and full stack traces appear in the dashboard detail panel.</p>
+  </div>
+
+  <div class="feature-card">
+    <span class="icon">&#9783;</span>
+    <h3>File Logging</h3>
+    <p>Write task logs to a plain text file alongside the dashboard. Works with <code>tail -f</code>, <code>grep</code>, and any log shipper (Loki, Datadog, Fluentd, CloudWatch). Supports automatic rotation and external rotation via logrotate.</p>
   </div>
 
   <div class="feature-card">

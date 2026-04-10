@@ -59,6 +59,53 @@ This pattern works without `install()` because it goes through the normal FastAP
 | `background_tasks: ManagedBackgroundTasks` | Yes | Yes |
 | `tasks=Depends(task_manager.get_tasks)` | No | No (untyped unless annotated) |
 
+## Multi-level dependencies
+
+FastAPI supports declaring `BackgroundTasks` at multiple levels: in a route, in a dependency, and in sub-dependencies. fastapi-taskflow supports the same, but the behaviour depends on which pattern you use.
+
+### With `install()` or `auto_install=True`
+
+FastAPI creates **one** `BackgroundTasks` instance per request and reuses it at every injection point. Because `install()` replaces the class FastAPI uses to create that instance, every `BackgroundTasks` annotation at every level receives the same `ManagedBackgroundTasks` object. All `add_task()` calls are tracked.
+
+```python
+def notify_service(background_tasks: BackgroundTasks):
+    background_tasks.add_task(send_notification, ...)   # managed
+
+@app.post("/signup")
+def signup(background_tasks: BackgroundTasks, svc=Depends(notify_service)):
+    background_tasks.add_task(send_email, ...)          # managed, same instance
+```
+
+### With `Depends(task_manager.get_tasks)`
+
+FastAPI caches dependency results within a request. If multiple route levels declare `Depends(task_manager.get_tasks)`, FastAPI calls `get_tasks` once and passes the same `ManagedBackgroundTasks` instance to all of them.
+
+```python
+def notify_service(tasks=Depends(task_manager.get_tasks)):
+    tasks.add_task(send_notification, ...)
+
+@app.post("/signup")
+def signup(tasks=Depends(task_manager.get_tasks), svc=Depends(notify_service)):
+    tasks.add_task(send_email, ...)   # same instance as notify_service receives
+```
+
+### The mixed case to avoid
+
+If a sub-dependency uses `Depends(task_manager.get_tasks)` but the route declares the raw `BackgroundTasks` annotation without `install()`, the two are different objects:
+
+```python
+def notify_service(tasks=Depends(task_manager.get_tasks)):
+    tasks.add_task(send_notification, ...)   # managed
+
+@app.post("/signup")
+def signup(background_tasks: BackgroundTasks, svc=Depends(notify_service)):
+    background_tasks.add_task(send_email, ...)   # NOT managed, no tracking
+```
+
+Both task lists share the same underlying Starlette list so both tasks run, but the route-level call bypasses the managed wrapper. That task gets no UUID, no retries, and no dashboard visibility.
+
+The fix is to use `install()` so the route annotation is also managed, or switch the route to `Depends(task_manager.get_tasks)` to be consistent.
+
 ## No dashboard
 
 If you are not using `TaskAdmin`, call `install` directly:

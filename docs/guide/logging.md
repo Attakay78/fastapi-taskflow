@@ -58,3 +58,5 @@ Failed tasks with logs will show both the **Logs** tab and the **Error** tab in 
 **Error tab** — error message and collapsible stack trace:
 
 [![Task error and stack trace panel](../assets/images/error.png){ .screenshot }](../assets/images/error.png){ target="_blank" }
+
+See [File Logging](file-logging.md) for writing log entries to a plain text file for use with `tail -f`, `grep`, and log shippers.

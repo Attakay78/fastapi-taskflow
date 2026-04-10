@@ -171,6 +171,7 @@ class SnapshotScheduler:
                     record.args,
                     record.kwargs,
                     backend=self._backend,
+                    file_logger=self._task_manager.file_logger,
                 )
             )
             dispatched += 1
@@ -274,6 +275,10 @@ class SnapshotScheduler:
                         status=TaskStatus.INTERRUPTED,
                         end_time=datetime.utcnow(),
                     )
+                    if self._task_manager.file_logger is not None:
+                        self._task_manager.file_logger.lifecycle(
+                            t.task_id, t.func_name, "INTERRUPTED"
+                        )
                     to_interrupt.append(t)
 
         if to_interrupt:

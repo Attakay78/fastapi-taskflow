@@ -36,6 +36,7 @@ fastapi-taskflow is a thin layer on top of what you already have. It does not co
 - `requeue_on_interrupt`: opt-in requeue for idempotent tasks interrupted mid-execution
 - Idempotency keys: prevent duplicate execution of the same logical operation
 - Multi-instance support: atomic requeue claiming, shared task history across instances
+- File logging: write task logs to a plain text file for use with `tail -f`, `grep`, and log shippers
 - Zero-migration injection: keep your existing `BackgroundTasks` annotations
 - Both sync and async task functions supported
 
@@ -161,6 +162,30 @@ task_manager = TaskManager(
 - Live `PENDING` and `RUNNING` tasks from other instances are not visible in real time. Each instance only holds its own in-memory state.
 - SQLite multi-instance only works when all processes share the same file path on the same host. It does not work across separate machines.
 - Tasks in `RUNNING` state at the time of a hard crash (SIGKILL, OOM) cannot be recovered. Only clean shutdowns trigger the pending store write.
+
+## File logging
+
+In addition to the dashboard, log entries can be written to a plain text file. This makes it easy to use standard tools like `tail -f`, `grep`, and log shippers (Loki, Datadog, Fluentd, CloudWatch) alongside the dashboard.
+
+```python
+task_manager = TaskManager(
+    snapshot_db="tasks.db",
+    log_file="tasks.log",
+    log_lifecycle=True,
+)
+```
+
+Each line has the format `[task_id] [func_name] 2024-01-01T12:00:00 message`. With `log_lifecycle=True`, status transitions (`RUNNING`, `SUCCESS`, `FAILED`, `INTERRUPTED`) are also written.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `log_file` | `str` | `None` | Path to the log file. File logging is disabled when not set. |
+| `log_file_max_bytes` | `int` | `10485760` | Maximum file size before rotating. Ignored in `watched` mode. |
+| `log_file_backup_count` | `int` | `5` | Number of rotated backup files to keep. Ignored in `watched` mode. |
+| `log_file_mode` | `str` | `"rotate"` | `"rotate"` for automatic rotation; `"watched"` for external rotation via logrotate. |
+| `log_lifecycle` | `bool` | `False` | Write a line on each task status transition. |
+
+For multi-process or multi-host deployments see the [file logging guide](docs/guide/logging.md#file-logging).
 
 ## What this is not
 
