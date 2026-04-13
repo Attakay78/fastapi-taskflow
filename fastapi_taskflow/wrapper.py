@@ -9,20 +9,16 @@ from .models import TaskConfig
 
 
 class ManagedBackgroundTasks(BackgroundTasks):
-    """
-    A ``BackgroundTasks`` subclass that intercepts ``add_task`` to inject
-    retries, status tracking, and task IDs.
+    """A ``BackgroundTasks`` subclass that adds retries, status tracking, and task IDs.
 
-    Because it IS a ``BackgroundTasks``, ``isinstance`` checks pass and
-    type-checkers understand it as a drop-in replacement.
+    Because it subclasses ``BackgroundTasks``, it passes ``isinstance`` checks
+    and works as a drop-in replacement everywhere FastAPI expects the original type.
 
-    When constructed via ``Depends(task_manager.get_tasks)`` or
-    ``Depends(task_manager.background_tasks)`` it receives the native
-    ``BackgroundTasks`` instance that FastAPI manages for the request, and
-    shares its task list — so Starlette executes the wrapped tasks after the
-    response is sent exactly as normal.
+    When injected via ``Depends(task_manager.get_tasks)``, it receives the native
+    ``BackgroundTasks`` instance for the current request and shares its task list,
+    so Starlette runs the tasks after the response is sent as normal.
 
-    Recommended usage::
+    Usage::
 
         @app.post("/signup")
         def signup(
@@ -31,13 +27,6 @@ class ManagedBackgroundTasks(BackgroundTasks):
         ):
             task_id = background_tasks.add_task(send_email, email)
             return {"task_id": task_id}
-
-    Or with the original alias::
-
-        @app.post("/signup")
-        def signup(email: str, tasks=Depends(task_manager.get_tasks)):
-            task_id = tasks.add_task(send_email, email)
-            return {"task_id": task_id}
     """
 
     def __init__(
@@ -45,6 +34,16 @@ class ManagedBackgroundTasks(BackgroundTasks):
         task_manager: TaskManager,
         background_tasks: Optional[BackgroundTasks] = None,
     ) -> None:
+        """
+        Args:
+            task_manager: The :class:`~fastapi_taskflow.manager.TaskManager` that
+                holds the registry and store used when enqueuing tasks.
+            background_tasks: The native ``BackgroundTasks`` instance created by
+                FastAPI for the current request. When provided, this wrapper shares
+                its task list so Starlette runs both managed and unmanaged tasks
+                after the response is sent. Omit when constructing outside a request
+                context (e.g. in tests or the ``install()`` patch).
+        """
         super().__init__()  # initialises self.tasks = []
         self._task_manager = task_manager
         if background_tasks is not None:
@@ -59,22 +58,22 @@ class ManagedBackgroundTasks(BackgroundTasks):
         idempotency_key: Optional[str] = None,
         **kwargs: Any,
     ) -> str:
-        """
-        Enqueue *func* as a managed background task.
+        """Enqueue *func* as a managed background task and return its ``task_id``.
 
         Args:
-            func: The task function to run in the background.
+            func: The task function to run. Must be registered with
+                ``@task_manager.task()`` to get retries and config applied.
+                Unregistered functions are accepted and run with default settings.
             *args: Positional arguments forwarded to *func*.
-            idempotency_key: Optional caller-provided key.  If a non-failed
-                task with the same key already exists in the in-process store,
-                its ``task_id`` is returned immediately and *func* is not
-                enqueued again.  When a shared backend is configured, the key
-                is also checked and recorded there so cross-instance dedup
-                works for the same logical operation.
+            idempotency_key: Optional deduplication key. If a non-failed task
+                with the same key already exists in this process, its ``task_id``
+                is returned immediately and *func* is not enqueued again. When a
+                shared backend is configured, the key is also checked there to
+                prevent duplicate execution across multiple instances.
             **kwargs: Keyword arguments forwarded to *func*.
 
         Returns:
-            The ``task_id`` for the (possibly existing) task.
+            The ``task_id`` of the enqueued (or already-existing) task.
         """
         # In-process dedup: check the in-memory store first (fast, no I/O).
         if idempotency_key is not None:

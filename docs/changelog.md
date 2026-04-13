@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.1
+
+- Added docstrings with `Args:` and `Returns:` descriptions to all public classes, methods, and functions across the codebase.
+- Fixed `TaskStore._notify_change` to use `call_soon_threadsafe` so `task_log()` entries from sync tasks trigger live dashboard updates correctly.
+
+---
+
 ## v0.4.0
 
 ### File logging

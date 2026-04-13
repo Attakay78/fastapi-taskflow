@@ -1,14 +1,12 @@
-"""
-fastapi-taskflow
-======================
+"""fastapi-taskflow: decorator-driven background tasks with retries and a live dashboard.
 
-A lightweight decorator-driven task manager that upgrades FastAPI
-``BackgroundTasks`` with retries, visibility, and SQLite persistence —
-without changing how developers enqueue tasks.
+Upgrades FastAPI ``BackgroundTasks`` with retries, status tracking, and SQLite
+persistence without changing how you enqueue tasks.
 
 Quick start::
 
-    from fastapi_taskflow import TaskManager, TaskAdmin
+    from fastapi import Depends, FastAPI
+    from fastapi_taskflow import TaskAdmin, TaskManager
 
     task_manager = TaskManager(snapshot_db="tasks.db")
 
@@ -17,7 +15,7 @@ Quick start::
         ...
 
     app = FastAPI()
-    TaskAdmin(app, task_manager)                  # mounts /tasks routes + lifecycle
+    TaskAdmin(app, task_manager)  # mounts /tasks routes and manages lifecycle
 
     @app.post("/signup")
     def signup(email: str, tasks=Depends(task_manager.get_tasks)):

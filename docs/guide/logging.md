@@ -27,11 +27,19 @@ When a task retries, a `--- Retry N ---` separator is inserted automatically bet
 2026-04-07T10:00:01 Sending to user@example.com
 ```
 
-## Async tasks
+## Sync and async tasks
 
-`task_log()` works the same in async tasks:
+`task_log()` works the same in both sync and async tasks. Sync tasks run in a
+thread pool, and log entries are safely handed back to the event loop so the
+dashboard updates in real time.
 
 ```python
+@task_manager.task(retries=1)
+def generate_report(user_id: int) -> None:
+    task_log(f"Starting report for user {user_id}")
+    data = fetch_data(user_id)
+    task_log("Report complete")
+
 @task_manager.task(retries=1)
 async def process_webhook(payload: dict) -> None:
     task_log(f"Received event: {payload['type']}")

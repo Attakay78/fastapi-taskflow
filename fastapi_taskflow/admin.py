@@ -18,11 +18,9 @@ _AuthParam = Union[
 
 
 class TaskAdmin:
-    """
-    Mounts the task observability routes onto a FastAPI application and
-    manages the snapshot scheduler lifecycle (if enabled on the TaskManager).
+    """Mounts task observability routes onto a FastAPI app and manages the scheduler lifecycle.
 
-    All work is done in the constructor — no need to keep a reference::
+    All setup happens in the constructor, so you don't need to keep a reference::
 
         task_manager = TaskManager(snapshot_db="tasks.db")
         TaskAdmin(app, task_manager)
@@ -32,18 +30,19 @@ class TaskAdmin:
         TaskAdmin(app, task_manager, auth=[("alice", "pw1"), ("bob", "pw2")])
         TaskAdmin(app, task_manager, auth=MyBackend(), secret_key="...", token_expiry=3600)
 
-        # Custom mount path:
+        # Custom mount prefix:
         TaskAdmin(app, task_manager, path="/admin/tasks")
 
-    Routes exposed (relative to *path*):
+    Routes mounted (relative to *path*):
 
-    * ``GET {path}``                  — JSON list of all tasks
-    * ``GET {path}/metrics``          — JSON aggregated statistics
-    * ``GET {path}/{task_id}``        — JSON single task detail
-    * ``GET {path}/dashboard``        — live dashboard (HTML)
-    * ``GET {path}/auth/login``       — login page (when auth is configured)
-    * ``POST {path}/auth/login``      — process login (when auth is configured)
-    * ``GET {path}/auth/logout``      — logout (when auth is configured)
+    * ``GET  {path}``               -- JSON list of all tasks
+    * ``GET  {path}/metrics``       -- aggregated statistics
+    * ``GET  {path}/{task_id}``     -- single task detail
+    * ``POST {path}/{task_id}/retry`` -- retry a failed/interrupted task
+    * ``GET  {path}/dashboard``     -- live HTML dashboard
+    * ``GET  {path}/auth/login``    -- login page (when *auth* is set)
+    * ``POST {path}/auth/login``    -- process login form
+    * ``GET  {path}/auth/logout``   -- clear session cookie
     """
 
     def __init__(
@@ -58,6 +57,30 @@ class TaskAdmin:
         secret_key: str | None = None,
         poll_interval: float = 30.0,
     ) -> None:
+        """
+        Args:
+            app: The FastAPI application to mount routes onto.
+            task_manager: The :class:`~fastapi_taskflow.manager.TaskManager`
+                whose tasks will be exposed.
+            path: URL prefix for all mounted routes. Default is ``"/tasks"``.
+            display_func_args: When ``True``, task arguments are included in
+                the dashboard task list. Disable if args may contain sensitive data.
+            auto_install: When ``True``, calls :meth:`~fastapi_taskflow.manager.TaskManager.install`
+                on *app* so all ``BackgroundTasks`` routes receive managed injection
+                automatically. Equivalent to calling ``task_manager.install(app)``
+                before creating ``TaskAdmin``.
+            auth: Enables login-protected access to the dashboard and API.
+                Accepts a ``(username, password)`` tuple, a list of such tuples,
+                or a :class:`~fastapi_taskflow.auth.TaskAuthBackend` instance for
+                custom authentication logic. ``None`` (default) means no auth.
+            token_expiry: Session token lifetime in seconds. Default is 86400 (24 hours).
+                Only relevant when *auth* is set.
+            secret_key: HMAC secret used to sign session tokens. A secure random
+                key is generated automatically when *auth* is set and this is omitted.
+                Pass an explicit value to keep sessions valid across restarts.
+            poll_interval: How often (seconds) the dashboard polls for updates when
+                SSE is unavailable. Default is 30 seconds.
+        """
         self._task_manager = task_manager
 
         if auto_install:
@@ -110,6 +133,11 @@ class TaskAdmin:
             app.router.on_shutdown.append(self._close_file_logger)
 
     async def _on_startup(self) -> None:
+        """Restore persisted task history and re-dispatch any pending tasks.
+
+        Registered as a FastAPI startup event handler when a snapshot backend
+        is configured. Runs before the app begins accepting requests.
+        """
         scheduler = self._task_manager._scheduler
         assert scheduler is not None
         await scheduler.load()
@@ -118,6 +146,12 @@ class TaskAdmin:
         scheduler.start()
 
     async def _on_shutdown(self) -> None:
+        """Stop the background flush loop and persist any remaining tasks.
+
+        Registered as a FastAPI shutdown event handler. Flushes completed tasks
+        to the backend, and if ``requeue_pending=True``, saves unfinished tasks
+        so they can be re-dispatched on the next startup.
+        """
         scheduler = self._task_manager._scheduler
         assert scheduler is not None
         scheduler.stop()
@@ -126,5 +160,6 @@ class TaskAdmin:
             await scheduler.flush_pending()
 
     async def _close_file_logger(self) -> None:
+        """Flush and close file log handlers on shutdown."""
         if self._task_manager.file_logger is not None:
             self._task_manager.file_logger.close()

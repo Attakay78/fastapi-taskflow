@@ -19,9 +19,12 @@ if TYPE_CHECKING:
 
 
 class TaskManager:
-    """
-    Central object that holds the registry and store, and exposes the
-    ``@task_manager.task`` decorator and ``get_tasks`` FastAPI dependency.
+    """The central object that ties all components together.
+
+    Holds the :class:`~fastapi_taskflow.registry.TaskRegistry` and
+    :class:`~fastapi_taskflow.store.TaskStore`, exposes the ``@task_manager.task``
+    decorator, and provides FastAPI dependency helpers for injecting
+    :class:`~fastapi_taskflow.wrapper.ManagedBackgroundTasks` into routes.
 
     Usage::
 
@@ -31,10 +34,9 @@ class TaskManager:
         def send_email(address: str) -> None:
             ...
 
-        # Mount the admin dashboard (routes + lifecycle):
-        admin = TaskAdmin(app, task_manager)
+        app = FastAPI()
+        TaskAdmin(app, task_manager)  # mounts routes and manages lifecycle
 
-        # Inject managed tasks into any route:
         @app.post("/signup")
         def signup(email: str, tasks=Depends(task_manager.get_tasks)):
             task_id = tasks.add_task(send_email, email)
@@ -55,6 +57,37 @@ class TaskManager:
         log_file_mode: str = "rotate",
         log_lifecycle: bool = False,
     ) -> None:
+        """
+        Args:
+            snapshot_db: Shorthand for ``snapshot_backend=SqliteBackend(snapshot_db)``.
+                Creates a SQLite file at the given path with no extra dependencies.
+            snapshot_backend: A :class:`~fastapi_taskflow.backends.SnapshotBackend`
+                instance (e.g. :class:`~fastapi_taskflow.backends.RedisBackend`).
+                Takes precedence over *snapshot_db* when both are provided.
+            snapshot_interval: How often (seconds) the scheduler flushes completed
+                tasks to the backend. Default is 60 seconds.
+            requeue_pending: When ``True``, tasks that had not finished at shutdown
+                are saved and re-dispatched on the next startup. See
+                :attr:`~fastapi_taskflow.models.TaskConfig.requeue_on_interrupt` for
+                per-task control over interrupted (mid-execution) tasks.
+            merged_list_ttl: How long (seconds) to cache the backend read inside
+                :meth:`merged_list`. Only the backend portion is cached; in-memory
+                tasks are always included fresh. Default is 5 seconds.
+            log_file: Path to a plain-text log file. When set, every
+                :func:`~fastapi_taskflow.task_logging.task_log` entry is written
+                there in addition to the in-memory record.
+            log_file_max_bytes: Maximum file size before rotation. Default is 10 MB.
+                Ignored when *log_file_mode* is ``"watched"``.
+            log_file_backup_count: Number of rotated log files to keep. Default is 5.
+                Ignored when *log_file_mode* is ``"watched"``.
+            log_file_mode: ``"rotate"`` (default) uses
+                :class:`~logging.handlers.RotatingFileHandler`, safe for a single
+                process. ``"watched"`` uses
+                :class:`~logging.handlers.WatchedFileHandler` for multi-process
+                deployments where an external tool (e.g. logrotate) handles rotation.
+            log_lifecycle: When ``True``, task lifecycle transitions (RUNNING, SUCCESS,
+                FAILED, INTERRUPTED) are also written to the log file.
+        """
         self.registry = TaskRegistry()
         self.store = TaskStore()
 
@@ -111,18 +144,29 @@ class TaskManager:
         name: Optional[str] = None,
         requeue_on_interrupt: bool = False,
     ) -> Callable:
-        """Decorator factory that registers a function with execution config.
+        """Register a function as a managed background task.
+
+        Apply this decorator to any function you want to enqueue via
+        ``tasks.add_task()``. The function itself is returned unchanged, so it
+        can still be called directly in tests or other contexts.
 
         Args:
-            requeue_on_interrupt: When ``True`` and ``requeue_pending=True`` is
-                set on the :class:`TaskManager`, a task that was mid-execution
-                (``RUNNING``) at shutdown is saved as ``PENDING`` and re-executed
-                on the next startup.  Only set this for tasks whose function is
-                **idempotent** — i.e. safe to run from scratch even if it
-                partially executed before the crash (e.g. a pure DB sync).
-                When ``False`` (the default), interrupted tasks are saved to
-                history with status ``INTERRUPTED`` so they are visible in the
-                dashboard but are **not** re-executed automatically.
+            retries: Number of additional attempts after the first failure.
+            delay: Seconds to wait before the first retry.
+            backoff: Multiplier applied to *delay* on each retry (e.g. ``2.0``
+                for exponential backoff).
+            name: Override the display name in logs and the dashboard.
+            requeue_on_interrupt: When ``True`` (and ``requeue_pending=True`` on
+                this ``TaskManager``), a task interrupted at shutdown is saved as
+                PENDING and re-dispatched on the next startup. Only use this for
+                idempotent functions -- those that are safe to run from scratch
+                even if they partially completed before the crash.
+
+        Example::
+
+            @task_manager.task(retries=3, delay=1.0, backoff=2.0)
+            def send_email(address: str) -> None:
+                ...
         """
 
         def decorator(func: Callable) -> Callable:
@@ -144,12 +188,11 @@ class TaskManager:
     # ------------------------------------------------------------------
 
     def get_tasks(self, background_tasks: BackgroundTasks) -> "ManagedBackgroundTasks":
-        """
-        FastAPI dependency that injects a :class:`ManagedBackgroundTasks` instance.
+        """FastAPI dependency that injects a :class:`~fastapi_taskflow.wrapper.ManagedBackgroundTasks`.
 
-        FastAPI injects the native ``BackgroundTasks`` for the current request
-        automatically; the wrapper shares its task list so Starlette executes
-        the wrapped tasks after the response is sent.
+        FastAPI automatically resolves and injects the native ``BackgroundTasks``
+        for the current request. The wrapper shares that task list so Starlette
+        runs the tasks after the response is sent as normal.
 
         Use with ``Depends``::
 
@@ -166,39 +209,33 @@ class TaskManager:
     def background_tasks(
         self,
     ) -> Callable[["BackgroundTasks"], "ManagedBackgroundTasks"]:
-        """
-        Alias for :meth:`get_tasks` that enables the natural-feeling pattern::
+        """Alias for :meth:`get_tasks` that reads more naturally as a ``Depends`` argument::
 
-            @app.post("/signup")
-            def signup(
-                email: str,
-                background_tasks: ManagedBackgroundTasks = Depends(task_manager.background_tasks),
-            ):
-                task_id = background_tasks.add_task(send_email, email)
-                return {"task_id": task_id}
+        @app.post("/signup")
+        def signup(
+            email: str,
+            background_tasks: ManagedBackgroundTasks = Depends(task_manager.background_tasks),
+        ):
+            task_id = background_tasks.add_task(send_email, email)
+            return {"task_id": task_id}
         """
         return self.get_tasks
 
     async def merged_list(self) -> "list[TaskRecord]":
-        """
-        Return all known task records, merging the in-memory store with
-        completed records from the backend.
+        """Return all known task records, merging the in-memory store with the backend.
 
-        This gives a unified view across multiple instances sharing the same
-        backend (SQLite on the same host, or Redis):
+        Provides a unified view across multiple instances sharing the same backend:
 
-        * Live tasks (PENDING / RUNNING) only exist in the calling instance's
-          in-memory store — they are included as-is, always fresh.
-        * Completed tasks (SUCCESS / FAILED / INTERRUPTED) from **other**
-          instances are pulled from the backend and included.
-        * If the same task_id appears in both places the in-memory record
-          wins — it always has the most up-to-date status.
+        * Live tasks (PENDING / RUNNING) come from this instance's in-memory store
+          and are always fresh.
+        * Completed tasks from other instances are loaded from the backend.
+        * When the same ``task_id`` appears in both, the in-memory record wins
+          because it has the most current status.
 
         Falls back to ``store.list()`` when no backend is configured.
 
-        The backend read is cached for ``merged_list_ttl`` seconds (default 5s)
-        to avoid a full DB or Redis scan on every SSE event or dashboard refresh.
-        The in-memory merge always uses the latest live data regardless of cache.
+        The backend read is cached for ``merged_list_ttl`` seconds (default 5s) to
+        avoid a full DB or Redis scan on every SSE event or dashboard refresh.
         """
         live: dict[str, "TaskRecord"] = {t.task_id: t for t in self.store.list()}
 
@@ -224,29 +261,27 @@ class TaskManager:
         return list(merged.values())
 
     def install(self, app: "FastAPI") -> None:
-        """
-        Transparently intercept FastAPI's ``BackgroundTasks`` injection so that
-        routes can keep their existing signature unchanged::
+        """Patch FastAPI so existing ``BackgroundTasks`` routes get managed tasks automatically.
 
-            # No migration required after calling task_manager.install(app)
+        After calling this, routes that use the standard ``BackgroundTasks`` type
+        hint will receive a :class:`~fastapi_taskflow.wrapper.ManagedBackgroundTasks`
+        instance instead -- no route changes required::
+
+            task_manager.install(app)  # call once before defining routes
+
             @app.post("/signup")
             def signup(email: str, background_tasks: BackgroundTasks):
                 background_tasks.add_task(send_email, email)
-                # background_tasks is now a ManagedBackgroundTasks instance
+                # background_tasks is now ManagedBackgroundTasks
 
-        Works by patching ``fastapi.dependencies.utils.BackgroundTasks`` — the
-        exact reference FastAPI calls when it creates the injected instance for
-        every request.  The patch is process-wide (not scoped to ``app``), so
-        call this at most once per process.  If you have multiple apps and only
-        want managed injection on one of them, use ``Depends(task_manager.get_tasks)``
+        Works by patching ``fastapi.dependencies.utils.BackgroundTasks``, the
+        exact reference FastAPI uses when creating the injected instance per request.
+        The patch is process-wide, so call this at most once. If you only want
+        managed injection on specific routes, use ``Depends(task_manager.get_tasks)``
         instead.
 
-        Call once at app startup, before routes are defined::
-
-            task_manager.install(app)
-
-        After this call, all three patterns work and return a
-        :class:`ManagedBackgroundTasks` instance:
+        After this call, all three patterns return a
+        :class:`~fastapi_taskflow.wrapper.ManagedBackgroundTasks` instance:
 
         1. ``background_tasks: BackgroundTasks``  (zero migration)
         2. ``background_tasks: ManagedBackgroundTasks``  (explicit type)
@@ -258,7 +293,7 @@ class TaskManager:
         _tm = self
 
         class _BoundManaged(ManagedBackgroundTasks):
-            """Zero-arg subclass so FastAPI can call BackgroundTasks() at line 721."""
+            """Zero-arg subclass so FastAPI can call BackgroundTasks()"""
 
             def __init__(self) -> None:
                 super().__init__(_tm)

@@ -160,6 +160,8 @@ def test_stream_excluded_from_openapi():
 
 
 async def test_store_notifies_subscriber_on_update():
+    import asyncio
+
     from fastapi_taskflow.store import TaskStore
 
     store = TaskStore()
@@ -168,12 +170,17 @@ async def test_store_notifies_subscriber_on_update():
     q = store.add_subscriber()
     store.update("t1", status=TaskStatus.SUCCESS)
 
-    # The queue should have one notification
+    # _notify_change schedules _fan_out via call_soon; yield to the event loop
+    # so the callback runs before we check the queue.
+    await asyncio.sleep(0)
+
     item = q.get_nowait()
     assert item == "change"
 
 
 async def test_store_coalesces_rapid_changes():
+    import asyncio
+
     from fastapi_taskflow.store import TaskStore
 
     store = TaskStore()
@@ -184,6 +191,8 @@ async def test_store_coalesces_rapid_changes():
     store.update("t1", status=TaskStatus.RUNNING)
     store.update("t1", status=TaskStatus.SUCCESS)
     store.update("t1", retries_used=1)
+
+    await asyncio.sleep(0)
 
     assert q.qsize() == 1
 

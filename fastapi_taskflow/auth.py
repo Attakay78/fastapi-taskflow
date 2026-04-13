@@ -82,6 +82,19 @@ class _SimpleAuthBackend(TaskAuthBackend):
 def resolve_backend(
     auth: Union[tuple, list, TaskAuthBackend, None],
 ) -> TaskAuthBackend | None:
+    """Convert the *auth* parameter accepted by :class:`~fastapi_taskflow.admin.TaskAdmin`
+    into a :class:`TaskAuthBackend`, or return ``None`` for no authentication.
+
+    Args:
+        auth: A ``(username, password)`` tuple, a list of such tuples, an existing
+            :class:`TaskAuthBackend` instance, or ``None``.
+
+    Returns:
+        A :class:`TaskAuthBackend` instance, or ``None`` if *auth* is ``None``.
+
+    Raises:
+        TypeError: If *auth* is not one of the accepted types.
+    """
     if auth is None:
         return None
     if isinstance(auth, TaskAuthBackend):
@@ -111,6 +124,15 @@ def _b64url_decode(s: str) -> bytes:
 
 
 def create_token(secret_key: str, expiry: int) -> str:
+    """Create a signed HMAC-SHA256 JWT with an expiry claim.
+
+    Args:
+        secret_key: Secret used to sign the token.
+        expiry: Token lifetime in seconds from now.
+
+    Returns:
+        A dot-separated ``header.payload.signature`` token string.
+    """
     header = _b64url_encode(b'{"alg":"HS256","typ":"JWT"}')
     body = _b64url_encode(json.dumps({"exp": int(time.time()) + expiry}).encode())
     signing_input = f"{header}.{body}"
@@ -119,6 +141,17 @@ def create_token(secret_key: str, expiry: int) -> str:
 
 
 def verify_token(secret_key: str, token: str) -> bool:
+    """Verify a token created by :func:`create_token`.
+
+    Checks both the HMAC signature and the ``exp`` claim.
+
+    Args:
+        secret_key: The same secret used when the token was created.
+        token: The token string to verify.
+
+    Returns:
+        ``True`` if the signature is valid and the token has not expired.
+    """
     try:
         parts = token.split(".")
         if len(parts) != 3:
@@ -143,7 +176,15 @@ def verify_token(secret_key: str, token: str) -> bool:
 
 
 def make_api_guard(secret_key: str):
-    """Returns a FastAPI ``Depends`` that raises 401 for invalid/missing tokens."""
+    """Return a FastAPI ``Depends`` that rejects requests with invalid or missing tokens.
+
+    Args:
+        secret_key: The secret used to verify the session token cookie.
+
+    Returns:
+        A ``Depends`` instance that raises ``HTTP 401`` when the cookie is
+        absent or the token signature/expiry check fails.
+    """
 
     def _guard(request: Request) -> None:
         token = request.cookies.get(COOKIE_NAME, "")
@@ -285,6 +326,18 @@ def create_auth_router(
     token_expiry: int,
     prefix: str,
 ) -> APIRouter:
+    """Build the login/logout router for the dashboard.
+
+    Args:
+        backend: The auth backend used to validate credentials.
+        secret_key: HMAC secret for signing session tokens.
+        token_expiry: Token lifetime in seconds.
+        prefix: URL prefix (e.g. ``"/tasks"``) prepended to all auth routes.
+
+    Returns:
+        An :class:`~fastapi.APIRouter` with ``GET /auth/login``,
+        ``POST /auth/login``, and ``GET /auth/logout`` routes.
+    """
     router = APIRouter(prefix=prefix, include_in_schema=False)
     login_path = f"{prefix}/auth/login"
     dashboard_path = f"{prefix}/dashboard"

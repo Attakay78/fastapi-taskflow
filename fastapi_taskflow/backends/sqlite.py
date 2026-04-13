@@ -107,10 +107,13 @@ class SqliteBackend(SnapshotBackend):
     # ------------------------------------------------------------------
 
     def _init_db(self) -> None:
+        """Create tables and apply any pending schema migrations.
+
+        Uses WAL journal mode so multiple processes can read the database
+        concurrently while one writer is active (important for same-host
+        multi-instance deployments sharing a single SQLite file).
+        """
         with sqlite3.connect(self._db_path) as conn:
-            # WAL mode allows concurrent readers alongside one writer — much
-            # safer than the default exclusive-lock mode when multiple processes
-            # (e.g. two app instances) share the same SQLite file on the same host.
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(_CREATE_HISTORY)
             conn.execute(_CREATE_PENDING)
@@ -122,6 +125,7 @@ class SqliteBackend(SnapshotBackend):
                     pass  # column already exists
 
     def _save_sync(self, records: "list[TaskRecord]") -> int:
+        """Upsert *records* into the history table. Returns the number written."""
         now = datetime.utcnow().isoformat()
         rows = [
             (
@@ -147,6 +151,7 @@ class SqliteBackend(SnapshotBackend):
         return len(rows)
 
     def _save_pending_sync(self, records: "list[TaskRecord]") -> int:
+        """Replace the pending table with *records*. Returns the number written."""
         rows = [
             (
                 t.task_id,
@@ -165,6 +170,7 @@ class SqliteBackend(SnapshotBackend):
         return len(rows)
 
     def _load_pending_sync(self) -> "list[TaskRecord]":
+        """Read all rows from the pending table and return them as TaskRecord objects."""
         from ..models import TaskRecord, TaskStatus
 
         with sqlite3.connect(self._db_path) as conn:
@@ -194,11 +200,16 @@ class SqliteBackend(SnapshotBackend):
         return records
 
     def _clear_pending_sync(self) -> None:
+        """Delete all rows from the pending table."""
         with sqlite3.connect(self._db_path) as conn:
             conn.execute("DELETE FROM task_pending_requeue")
 
     def _claim_pending_sync(self, task_id: str) -> bool:
-        """Atomically delete one pending row. Returns True if we deleted it."""
+        """Delete the pending row for *task_id* and return ``True`` if this call deleted it.
+
+        SQLite's ``DELETE`` reports ``rowcount == 0`` when the row was already gone,
+        which means another process claimed it first.
+        """
         with sqlite3.connect(self._db_path) as conn:
             cur = conn.execute(
                 "DELETE FROM task_pending_requeue WHERE task_id = ?", (task_id,)
@@ -206,6 +217,7 @@ class SqliteBackend(SnapshotBackend):
             return cur.rowcount == 1
 
     def _check_idempotency_key_sync(self, key: str) -> "str | None":
+        """Return the ``task_id`` stored for *key*, or ``None`` if not found."""
         with sqlite3.connect(self._db_path) as conn:
             row = conn.execute(
                 "SELECT task_id FROM task_idempotency_keys WHERE idem_key = ?", (key,)
@@ -213,6 +225,7 @@ class SqliteBackend(SnapshotBackend):
         return row[0] if row else None
 
     def _record_idempotency_key_sync(self, key: str, task_id: str) -> None:
+        """Insert *key* -> *task_id* into the idempotency table (ignored if already present)."""
         from datetime import datetime
 
         with sqlite3.connect(self._db_path) as conn:
@@ -223,6 +236,7 @@ class SqliteBackend(SnapshotBackend):
             )
 
     def _load_sync(self) -> "list[TaskRecord]":
+        """Read all rows from the history table and return them as TaskRecord objects."""
         from ..models import TaskRecord, TaskStatus
 
         with sqlite3.connect(self._db_path) as conn:

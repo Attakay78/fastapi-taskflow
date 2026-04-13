@@ -32,11 +32,24 @@ def create_router(
 
     @router.get("", summary="List all tasks")
     async def list_tasks() -> list[dict[str, Any]]:
+        """Return all task records from the in-memory store merged with the backend.
+
+        Returns:
+            List of serialized :class:`~fastapi_taskflow.models.TaskRecord` dicts,
+            one per known task invocation.
+        """
         return [t.to_dict() for t in await task_manager.merged_list()]
 
     # Define /metrics before /{task_id} so the fixed path wins.
     @router.get("/metrics", summary="Aggregated task statistics")
     async def get_metrics() -> dict[str, Any]:
+        """Return aggregated counts and timing statistics across all tasks.
+
+        Returns:
+            A dict with keys: ``total``, ``success``, ``failed``, ``running``,
+            ``pending``, ``interrupted``, ``success_rate``, and
+            ``avg_duration_seconds``.
+        """
         tasks = await task_manager.merged_list()
         total = len(tasks)
         success = sum(1 for t in tasks if t.status.value == "success")
@@ -61,6 +74,19 @@ def create_router(
 
     @router.get("/{task_id}", summary="Get a single task by ID")
     async def get_task(task_id: str) -> dict[str, Any]:
+        """Return a single task record by its UUID.
+
+        Checks the in-memory store first, then falls back to the backend.
+
+        Args:
+            task_id: The UUID assigned when the task was enqueued.
+
+        Returns:
+            Serialized :class:`~fastapi_taskflow.models.TaskRecord` dict.
+
+        Raises:
+            HTTPException: 404 if no task with *task_id* exists.
+        """
         # Check in-memory first (fastest path), then fall back to backend.
         record = task_manager.store.get(task_id)
         if record is None and task_manager._scheduler is not None:

@@ -1,3 +1,14 @@
+"""Task execution engine.
+
+:func:`execute_task` is the single function responsible for running a task
+function through its full lifecycle: status transitions, retry loop,
+log capture, and optional persistence on completion.
+
+:func:`make_background_func` wraps ``execute_task`` into a zero-argument
+async callable that FastAPI's ``BackgroundTasks`` can call after the response
+is sent.
+"""
+
 import asyncio
 import inspect
 import traceback
@@ -24,25 +35,29 @@ async def execute_task(
     on_success: "Optional[Callable]" = None,
     file_logger: "Optional[TaskFileLogger]" = None,
 ) -> None:
-    """
-    Run *func* inside the execution lifecycle:
-      PENDING -> RUNNING -> SUCCESS | FAILED
+    """Run *func* through the full task lifecycle: PENDING -> RUNNING -> SUCCESS | FAILED.
 
-    Applies retry logic and records all state transitions into *store*.
-    Log entries emitted via :func:`task_log` are captured per attempt and
-    appended to the task record.  The full stack trace of the final failure
-    is stored as ``stacktrace``.
+    Handles the retry loop, records every status transition in *store*, and
+    captures :func:`~fastapi_taskflow.task_logging.task_log` entries per attempt.
+    The full traceback of the final failure is stored on the task record.
+
+    Both sync and async functions are supported. Sync functions are offloaded
+    to a thread pool via ``asyncio.to_thread`` so they do not block the event loop.
 
     Args:
-        backend: Optional backend used for idempotency key checks and
-            immediate history flush on success.
-        on_success: Optional async callable invoked with ``task_id`` after
-            the task transitions to SUCCESS.  Used by the snapshot scheduler
-            to persist the record immediately so a post-success crash does
-            not cause re-execution on restart.
-        file_logger: Optional :class:`~fastapi_taskflow.file_logger.TaskFileLogger`
-            instance.  When provided, every :func:`task_log` entry and retry
-            separator is also written to the configured text file.
+        func: The task function to run (sync or async).
+        task_id: ID of the record already created in *store*.
+        config: Retry/delay settings from ``@task_manager.task()``.
+        store: The in-memory store where status updates are written.
+        args: Positional arguments to pass to *func*.
+        kwargs: Keyword arguments to pass to *func*.
+        backend: When provided, used to check cross-instance idempotency keys
+            before running and to record the key on success.
+        on_success: Async callable invoked with *task_id* right after SUCCESS.
+            Used by the snapshot scheduler to flush the record immediately so
+            a crash before the next periodic flush does not cause re-execution.
+        file_logger: When provided, every log entry and lifecycle event is also
+            written to the configured log file.
     """
     record = store.get(task_id)
     func_name = func.__name__
@@ -142,7 +157,12 @@ def make_background_func(
     on_success: "Optional[Callable]" = None,
     file_logger: "Optional[TaskFileLogger]" = None,
 ) -> Callable:
-    """Return a zero-argument async callable suitable for BackgroundTasks.add_task."""
+    """Wrap *func* into a zero-argument async callable for ``BackgroundTasks.add_task``.
+
+    FastAPI's ``BackgroundTasks`` requires callables that take no arguments.
+    This closes over all the parameters needed by :func:`execute_task` so
+    the wrapper can be handed directly to Starlette.
+    """
 
     async def _wrapped() -> None:
         await execute_task(

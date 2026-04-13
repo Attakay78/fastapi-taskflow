@@ -36,26 +36,23 @@ logger = logging.getLogger(__name__)
 
 
 class SnapshotScheduler:
-    """
-    Drives the periodic flush loop, startup restore, and optional requeue.
+    """Drives the periodic flush loop, startup restore, and optional requeue.
 
     Args:
-        task_manager: The :class:`~fastapi_taskflow.TaskManager` whose
+        task_manager: The :class:`~fastapi_taskflow.manager.TaskManager` whose
             store will be snapshotted.
         backend: Any :class:`~fastapi_taskflow.backends.SnapshotBackend`
-            implementation.
-        interval: How often (in seconds) to flush completed tasks to the
-            backend.
+            implementation (SQLite, Redis, or custom).
+        interval: How often (seconds) to flush completed tasks to the backend.
+            Default is 60 seconds.
         requeue_pending: When ``True``:
 
-            * On **shutdown** — tasks still in ``pending`` or ``running``
-              state are saved to the backend's pending store (``running``
-              tasks are treated as ``pending`` since they did not complete).
-            * On **startup** — those tasks are loaded and re-dispatched via
-              :func:`asyncio.ensure_future` for each function that is still
-              registered in the task registry.  Tasks whose function is no
-              longer registered are skipped with a warning.  The pending
-              store is cleared after successful requeue.
+            * On shutdown -- tasks still ``pending`` or ``running`` are saved
+              to the backend's pending store. Running tasks are treated as
+              pending since they did not complete.
+            * On startup -- those tasks are loaded and re-dispatched. Tasks
+              whose function is no longer registered are skipped with a warning.
+              The pending store is cleared after all tasks are dispatched.
     """
 
     def __init__(

@@ -10,7 +10,7 @@ from fastapi_taskflow import task_log
 def task_log(message: str) -> None
 ```
 
-Emits a timestamped log entry from within a running task. The entry is appended to the task's `logs` list and becomes immediately visible in the live dashboard under the **Logs** tab.
+Emits a timestamped log entry from within a running task. The entry is appended to the task's `logs` list and becomes immediately visible in the live dashboard under the **Logs** tab. Works in both sync and async task functions.
 
 ## Parameters
 
