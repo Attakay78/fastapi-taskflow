@@ -77,15 +77,23 @@ sequenceDiagram
     participant ManagedBackgroundTasks
     participant TaskStore
     participant Executor
+    participant Observer
+    participant Backend
 
     Client->>Route: POST /signup
-    Route->>ManagedBackgroundTasks: add_task(send_email, address)
-    ManagedBackgroundTasks->>TaskStore: create(task_id, PENDING)
+    Route->>ManagedBackgroundTasks: add_task(send_email, address, tags={...})
+    Note over ManagedBackgroundTasks: capture context snapshot<br/>encrypt args if configured
+    ManagedBackgroundTasks->>TaskStore: create(task_id, PENDING, tags)
     ManagedBackgroundTasks-->>Route: task_id
     Route-->>Client: {"task_id": "..."}
 
     Note over Executor: After response is sent
     Executor->>TaskStore: update(RUNNING)
+    Executor->>Observer: on_lifecycle(RUNNING)
     Executor->>Executor: call send_email(address)
+    Note over Executor: task_log() calls emit LogEvent
+    Executor->>Observer: on_log(LogEvent)
     Executor->>TaskStore: update(SUCCESS)
+    Executor->>Observer: on_lifecycle(SUCCESS)
+    Executor->>Backend: flush_one(task_id)
 ```

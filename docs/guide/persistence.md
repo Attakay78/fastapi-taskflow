@@ -41,6 +41,7 @@ See the [multi-instance guide](multi-instance.md) for deployment setup and load 
 sequenceDiagram
     participant App
     participant SnapshotScheduler
+    participant Executor
     participant Backend
 
     Note over App: startup
@@ -52,6 +53,11 @@ sequenceDiagram
     loop every snapshot_interval seconds
         SnapshotScheduler->>Backend: save(completed tasks)
     end
+
+    Note over Executor: task reaches SUCCESS or FAILED
+    Executor->>SnapshotScheduler: on_success(task_id)
+    SnapshotScheduler->>Backend: flush_one(task_id)
+    Note over SnapshotScheduler: immediate flush closes the gap<br/>between completion and next<br/>periodic flush
 
     Note over App: shutdown
     App->>SnapshotScheduler: flush()

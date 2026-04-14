@@ -727,11 +727,13 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
     if (!btn) return;
     if (paused) {
       btn.classList.add('pause-btn--paused');
+      btn.title = 'Resume live updates';
       btn.innerHTML =
         '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>'
         + ' Resume' + (pendingNewTasks > 0 ? ' <span class="new-badge">+' + pendingNewTasks + '</span>' : '');
     } else {
       btn.classList.remove('pause-btn--paused');
+      btn.title = 'Pause live updates';
       btn.innerHTML =
         '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>'
         + ' Pause';

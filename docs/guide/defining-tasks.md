@@ -54,9 +54,13 @@ stateDiagram-v2
     RUNNING --> RUNNING : retry attempt
     RUNNING --> INTERRUPTED : shutdown during execution (requeue_on_interrupt=False)
     RUNNING --> PENDING : shutdown during execution (requeue_on_interrupt=True)
+    FAILED --> [*] : POST /tasks/{id}/retry\ncreates new task
+    INTERRUPTED --> [*] : POST /tasks/{id}/retry\ncreates new task
 ```
 
 `INTERRUPTED` tasks are visible in the dashboard and queryable via the API. They are not retried automatically. Use `INTERRUPTED` to identify tasks that need manual follow-up after an unclean shutdown.
+
+`POST /tasks/{task_id}/retry` re-enqueues a `FAILED` or `INTERRUPTED` task as a brand new task with a fresh UUID. The original record is left unchanged in history.
 
 ## Unregistered functions
 

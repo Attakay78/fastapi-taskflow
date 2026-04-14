@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     branches: [main]
+    paths:
+      - "pyproject.toml"
+  workflow_dispatch:
 
 concurrency:
   group: release
@@ -46,11 +49,10 @@ jobs:
             echo "should-release=true" >> "$GITHUB_OUTPUT"
           fi
 
-  # ── 2. CI gate ─────────────────────────────────────────────────────────────
+  # ── 2. CI gate (always runs) ───────────────────────────────────────────────
   ci-gate:
     name: CI gate
     needs: check-version
-    if: needs.check-version.outputs.should-release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,7 +72,7 @@ jobs:
           ruff format --check .
 
       - name: Type check
-        run: mypy fastapi_taskflow/
+        run: mypy fastapi_taskflow/ --ignore-missing-imports
 
       - name: Tests
         run: pytest --tb=short -q

@@ -15,32 +15,34 @@ if TYPE_CHECKING:
 
 _CREATE_HISTORY = """
 CREATE TABLE IF NOT EXISTS task_snapshots (
-    task_id        TEXT    PRIMARY KEY,
-    func_name      TEXT    NOT NULL,
-    status         TEXT    NOT NULL,
-    created_at     TEXT,
-    start_time     TEXT,
-    end_time       TEXT,
-    duration       REAL,
-    retries_used   INTEGER DEFAULT 0,
-    error          TEXT,
-    snapshotted_at TEXT,
-    args_json      TEXT,
-    kwargs_json    TEXT,
-    logs_json      TEXT,
-    stacktrace     TEXT
+    task_id           TEXT    PRIMARY KEY,
+    func_name         TEXT    NOT NULL,
+    status            TEXT    NOT NULL,
+    created_at        TEXT,
+    start_time        TEXT,
+    end_time          TEXT,
+    duration          REAL,
+    retries_used      INTEGER DEFAULT 0,
+    error             TEXT,
+    snapshotted_at    TEXT,
+    args_json         TEXT,
+    kwargs_json       TEXT,
+    logs_json         TEXT,
+    stacktrace        TEXT,
+    encrypted_payload TEXT
 )
 """
 
 # Separate table for tasks that were pending at shutdown and need requeue.
 _CREATE_PENDING = """
 CREATE TABLE IF NOT EXISTS task_pending_requeue (
-    task_id     TEXT PRIMARY KEY,
-    func_name   TEXT NOT NULL,
-    created_at  TEXT,
-    retries_used INTEGER DEFAULT 0,
-    args_json   TEXT,
-    kwargs_json TEXT
+    task_id           TEXT PRIMARY KEY,
+    func_name         TEXT NOT NULL,
+    created_at        TEXT,
+    retries_used      INTEGER DEFAULT 0,
+    args_json         TEXT,
+    kwargs_json       TEXT,
+    encrypted_payload TEXT
 )
 """
 
@@ -58,20 +60,23 @@ _MIGRATIONS = [
     "ALTER TABLE task_snapshots ADD COLUMN kwargs_json TEXT",
     "ALTER TABLE task_snapshots ADD COLUMN logs_json TEXT",
     "ALTER TABLE task_snapshots ADD COLUMN stacktrace TEXT",
+    "ALTER TABLE task_snapshots ADD COLUMN encrypted_payload TEXT",
+    "ALTER TABLE task_pending_requeue ADD COLUMN encrypted_payload TEXT",
 ]
 
 _UPSERT_HISTORY = """
 INSERT OR REPLACE INTO task_snapshots
     (task_id, func_name, status, created_at, start_time, end_time,
      duration, retries_used, error, snapshotted_at, args_json, kwargs_json,
-     logs_json, stacktrace)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     logs_json, stacktrace, encrypted_payload)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _UPSERT_PENDING = """
 INSERT OR REPLACE INTO task_pending_requeue
-    (task_id, func_name, created_at, retries_used, args_json, kwargs_json)
-VALUES (?, ?, ?, ?, ?, ?)
+    (task_id, func_name, created_at, retries_used, args_json, kwargs_json,
+     encrypted_payload)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -143,6 +148,7 @@ class SqliteBackend(SnapshotBackend):
                 json.dumps(t.kwargs, default=repr),
                 json.dumps(t.logs),
                 t.stacktrace,
+                t.encrypted_payload.decode() if t.encrypted_payload else None,
             )
             for t in records
         ]
@@ -160,6 +166,7 @@ class SqliteBackend(SnapshotBackend):
                 t.retries_used,
                 json.dumps(list(t.args), default=repr),
                 json.dumps(t.kwargs, default=repr),
+                t.encrypted_payload.decode() if t.encrypted_payload else None,
             )
             for t in records
         ]
@@ -180,6 +187,7 @@ class SqliteBackend(SnapshotBackend):
         records: list[TaskRecord] = []
         for row in rows:
             d = dict(row)
+            enc = d.get("encrypted_payload")
             records.append(
                 TaskRecord(
                     task_id=d["task_id"],
@@ -195,6 +203,7 @@ class SqliteBackend(SnapshotBackend):
                     if d.get("args_json")
                     else (),
                     kwargs=json.loads(d["kwargs_json"]) if d.get("kwargs_json") else {},
+                    encrypted_payload=enc.encode() if enc else None,
                 )
             )
         return records
@@ -246,6 +255,7 @@ class SqliteBackend(SnapshotBackend):
         records: list[TaskRecord] = []
         for row in rows:
             d = dict(row)
+            enc = d.get("encrypted_payload")
             records.append(
                 TaskRecord(
                     task_id=d["task_id"],
@@ -272,6 +282,7 @@ class SqliteBackend(SnapshotBackend):
                     kwargs=json.loads(d["kwargs_json"]) if d.get("kwargs_json") else {},
                     logs=json.loads(d["logs_json"]) if d.get("logs_json") else [],
                     stacktrace=d.get("stacktrace"),
+                    encrypted_payload=enc.encode() if enc else None,
                 )
             )
         return records

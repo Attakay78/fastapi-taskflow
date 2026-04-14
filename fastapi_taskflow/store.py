@@ -93,6 +93,8 @@ class TaskStore:
         args: tuple,
         kwargs: dict,
         idempotency_key: Optional[str] = None,
+        tags: Optional[dict] = None,
+        encrypted_payload: Optional[bytes] = None,
     ) -> TaskRecord:
         """Create a new ``PENDING`` record and add it to the store.
 
@@ -106,6 +108,8 @@ class TaskStore:
             args=args,
             kwargs=kwargs,
             idempotency_key=idempotency_key,
+            tags=tags or {},
+            encrypted_payload=encrypted_payload,
         )
         with self._lock:
             self._tasks[task_id] = record

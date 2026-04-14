@@ -4,7 +4,14 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
   workflow_dispatch:
+
+concurrency:
+  group: deploy-docs
+  cancel-in-progress: false
 
 permissions:
   contents: write

@@ -116,6 +116,9 @@ class RedisBackend(SnapshotBackend):
             "kwargs_json": json.dumps(record.kwargs, default=repr),
             "logs_json": json.dumps(record.logs),
             "stacktrace": record.stacktrace or "",
+            "encrypted_payload": record.encrypted_payload.decode()
+            if record.encrypted_payload
+            else "",
         }
 
     @staticmethod
@@ -151,6 +154,9 @@ class RedisBackend(SnapshotBackend):
             else {},
             logs=json.loads(mapping["logs_json"]) if mapping.get("logs_json") else [],
             stacktrace=mapping.get("stacktrace") or None,
+            encrypted_payload=(
+                enc.encode() if (enc := mapping.get("encrypted_payload")) else None
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -225,6 +231,9 @@ class RedisBackend(SnapshotBackend):
                 "retries_used": str(record.retries_used),
                 "args_json": json.dumps(list(record.args), default=repr),
                 "kwargs_json": json.dumps(record.kwargs, default=repr),
+                "encrypted_payload": record.encrypted_payload.decode()
+                if record.encrypted_payload
+                else "",
             }
             pipe.hset(key, mapping=mapping)
             pipe.sadd(self._pending_index_key(), record.task_id)
@@ -274,6 +283,9 @@ class RedisBackend(SnapshotBackend):
                     if d.get("args_json")
                     else (),
                     kwargs=json.loads(d["kwargs_json"]) if d.get("kwargs_json") else {},
+                    encrypted_payload=(
+                        enc.encode() if (enc := d.get("encrypted_payload")) else None
+                    ),
                 )
             )
         return records

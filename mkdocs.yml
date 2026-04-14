@@ -67,8 +67,13 @@ nav:
   - Guide:
     - Defining Tasks: guide/defining-tasks.md
     - Injection Patterns: guide/injection.md
+    - Adding Tasks: guide/adding-tasks.md
     - Task Logging: guide/logging.md
+    - Task Context: guide/task-context.md
+    - Observability: guide/observability.md
     - File Logging: guide/file-logging.md
+    - Argument Encryption: guide/encryption.md
+    - Concurrency Controls: guide/concurrency.md
     - Persistence: guide/persistence.md
     - Pending Requeue: guide/requeue.md
     - Custom Backends: guide/backends.md
@@ -80,7 +85,8 @@ nav:
     - TaskAdmin: api/task-admin.md
     - ManagedBackgroundTasks: api/managed-background-tasks.md
     - task_log: api/task-log.md
-    - TaskFileLogger: api/task-file-logger.md
+    - Loggers: api/task-file-logger.md
     - Models: api/models.md
     - Backends: api/backends.md
+  - Examples: examples.md
   - Changelog: changelog.md

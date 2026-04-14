@@ -168,7 +168,10 @@ class SnapshotScheduler:
                     record.args,
                     record.kwargs,
                     backend=self._backend,
-                    file_logger=self._task_manager.file_logger,
+                    logger=self._task_manager.logger,
+                    encryptor=self._task_manager.fernet,
+                    semaphore=self._task_manager._task_semaphore,
+                    sync_executor=self._task_manager._sync_executor,
                 )
             )
             dispatched += 1
@@ -267,14 +270,25 @@ class SnapshotScheduler:
                 else:
                     # Mark as INTERRUPTED in the store and flush to history so
                     # it's visible in the dashboard but will not be re-executed.
+                    end_time = datetime.utcnow()
                     self._task_manager.store.update(
                         t.task_id,
                         status=TaskStatus.INTERRUPTED,
-                        end_time=datetime.utcnow(),
+                        end_time=end_time,
                     )
-                    if self._task_manager.file_logger is not None:
-                        self._task_manager.file_logger.lifecycle(
-                            t.task_id, t.func_name, "INTERRUPTED"
+                    if self._task_manager.logger is not None:
+                        from .loggers.base import LifecycleEvent
+
+                        await self._task_manager.logger.on_lifecycle(
+                            LifecycleEvent(
+                                task_id=t.task_id,
+                                func_name=t.func_name,
+                                status=TaskStatus.INTERRUPTED,
+                                timestamp=end_time,
+                                attempt=t.retries_used,
+                                retries_used=t.retries_used,
+                                tags=t.tags,
+                            )
                         )
                     to_interrupt.append(t)
 

@@ -125,41 +125,13 @@ class TaskAdmin:
             )
         )
 
-        if task_manager._scheduler is not None:
-            app.router.on_startup.append(self._on_startup)
-            app.router.on_shutdown.append(self._on_shutdown)
-
-        if task_manager.file_logger is not None:
-            app.router.on_shutdown.append(self._close_file_logger)
+        app.router.on_startup.append(self._on_startup)
+        app.router.on_shutdown.append(self._on_shutdown)
 
     async def _on_startup(self) -> None:
-        """Restore persisted task history and re-dispatch any pending tasks.
-
-        Registered as a FastAPI startup event handler when a snapshot backend
-        is configured. Runs before the app begins accepting requests.
-        """
-        scheduler = self._task_manager._scheduler
-        assert scheduler is not None
-        await scheduler.load()
-        if scheduler._requeue_pending:
-            await scheduler.requeue()
-        scheduler.start()
+        """Delegate app startup to :meth:`~fastapi_taskflow.manager.TaskManager.startup`."""
+        await self._task_manager.startup()
 
     async def _on_shutdown(self) -> None:
-        """Stop the background flush loop and persist any remaining tasks.
-
-        Registered as a FastAPI shutdown event handler. Flushes completed tasks
-        to the backend, and if ``requeue_pending=True``, saves unfinished tasks
-        so they can be re-dispatched on the next startup.
-        """
-        scheduler = self._task_manager._scheduler
-        assert scheduler is not None
-        scheduler.stop()
-        await scheduler.flush()
-        if scheduler._requeue_pending:
-            await scheduler.flush_pending()
-
-    async def _close_file_logger(self) -> None:
-        """Flush and close file log handlers on shutdown."""
-        if self._task_manager.file_logger is not None:
-            self._task_manager.file_logger.close()
+        """Delegate app shutdown to :meth:`~fastapi_taskflow.manager.TaskManager.shutdown`."""
+        await self._task_manager.shutdown()

@@ -14,6 +14,7 @@ TaskAdmin(
     auth: tuple | list | TaskAuthBackend | None = None,
     token_expiry: int = 86400,
     secret_key: str | None = None,
+    poll_interval: float = 30.0,
 )
 ```
 
@@ -27,6 +28,7 @@ TaskAdmin(
 | `auth` | `tuple \| list \| TaskAuthBackend \| None` | `None` | Credentials for dashboard and API authentication. `None` disables auth entirely. |
 | `token_expiry` | `int` | `86400` | Seconds before an issued session token expires. |
 | `secret_key` | `str \| None` | `None` | HMAC signing key for tokens. Auto-generated if `None` and auth is configured. |
+| `poll_interval` | `float` | `30.0` | Seconds between dashboard poll requests when SSE is unavailable. |
 
 ## Usage
 
@@ -84,10 +86,40 @@ TaskAdmin(
 
 ## Lifecycle
 
-When a `snapshot_backend` or `snapshot_db` is set on `TaskManager`, `TaskAdmin` registers startup and shutdown hooks:
+`TaskAdmin` always registers FastAPI startup and shutdown hooks that delegate to `TaskManager.startup()` and `TaskManager.shutdown()`. You do not need a separate lifespan handler.
 
-- **Startup**: loads persisted history, requeues pending tasks if `requeue_pending=True`, starts the periodic flush loop
-- **Shutdown**: stops the flush loop, flushes completed tasks, saves pending tasks if `requeue_pending=True`
+**Startup** (in order):
+
+1. Loads persisted task history from the backend (if configured)
+2. Requeues pending tasks if `requeue_pending=True`
+3. Starts the periodic snapshot flush loop
+4. Initialises the logger chain
+
+**Shutdown** (in order):
+
+1. Stops the flush loop
+2. Flushes completed tasks to the backend
+3. Saves unfinished tasks if `requeue_pending=True`
+4. Closes the logger chain
+5. Shuts down the sync thread pool (if `max_sync_threads` was set)
+
+### Without TaskAdmin
+
+If you are not using `TaskAdmin`, call `startup()` and `shutdown()` yourself inside a FastAPI lifespan handler:
+
+```python
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app):
+    await task_manager.startup()
+    yield
+    await task_manager.shutdown()
+
+app = FastAPI(lifespan=lifespan)
+```
+
+Steps that are not applicable (e.g. no backend configured, no loggers) are skipped automatically.
 
 ## Routes mounted
 

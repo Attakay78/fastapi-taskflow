@@ -70,19 +70,26 @@ sequenceDiagram
     Note over Scheduler: startup
     Scheduler->>Backend: load_pending()
     Backend-->>Scheduler: pending records
+    Scheduler->>Backend: load()
+    Backend-->>Scheduler: history records
+    Note over Scheduler: build set of already-completed task_ids
 
     loop for each pending task
-        Scheduler->>Backend: claim_pending(task_id)
-        alt claimed
-            Scheduler->>Registry: get_by_name(func_name)
-            alt function found
-                Registry-->>Scheduler: func, config
-                Scheduler->>Executor: ensure_future(execute_task)
-            else function not found
-                Scheduler->>Scheduler: log warning, skip
+        alt task_id in completed history
+            Scheduler->>Scheduler: skip (already succeeded before crash)
+        else
+            Scheduler->>Backend: claim_pending(task_id)
+            alt claimed
+                Scheduler->>Registry: get_by_name(func_name)
+                alt function found
+                    Registry-->>Scheduler: func, config
+                    Scheduler->>Executor: ensure_future(execute_task)
+                else function not found
+                    Scheduler->>Scheduler: log warning, skip
+                end
+            else already claimed by another instance
+                Scheduler->>Scheduler: skip
             end
-        else already claimed by another instance
-            Scheduler->>Scheduler: skip
         end
     end
 

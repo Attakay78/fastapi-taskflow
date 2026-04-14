@@ -6,14 +6,16 @@ Run with:
 
 Then try:
     curl -X POST "http://localhost:8000/signup?email=user@example.com"
+    curl -X POST "http://localhost:8000/signup?email=vip@example.com&plan=pro"
     curl -X POST "http://localhost:8000/webhook"
     curl "http://localhost:8000/tasks"
     curl "http://localhost:8000/tasks/metrics"
+    open "http://localhost:8000/tasks/dashboard"
 """
 
 import time
 
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import BackgroundTasks, Depends, FastAPI
 
 from fastapi_taskflow import ManagedBackgroundTasks, TaskAdmin, TaskManager
 
@@ -41,21 +43,26 @@ async def process_webhook(payload: dict) -> None:
 
 # --- Pattern 1: zero-migration ---
 # Use the native BackgroundTasks type annotation — no import changes needed.
-# task_manager.install(app) ensures the injected instance is ManagedBackgroundTasks.
+# auto_install=True ensures the injected instance is ManagedBackgroundTasks.
 @app.post("/signup", summary="Create user and queue a welcome email")
-def signup(email: str, background_tasks: BackgroundTasks):
-    task_id = background_tasks.add_task(send_email, address=email)
+def signup(email: str, plan: str = "free", background_tasks: BackgroundTasks = None):
+    # tags attach key/value labels to the task — visible in the dashboard and
+    # forwarded to every structured log event emitted by the task.
+    task_id = background_tasks.add_task(
+        send_email,
+        address=email,
+        tags={"plan": plan, "source": "signup"},
+    )
     return {"message": "User created", "task_id": task_id}
 
 
-# --- Pattern 2: explicit managed type (also requires install) ---
-# Declare ManagedBackgroundTasks to make the intent clear and get the
-# full return type (task_id: str) without a cast. install() is still
-# required — FastAPI ignores the subclass annotation and would inject
-# native BackgroundTasks without the patch.
+# --- Pattern 2: explicit dependency injection ---
+# Declare ManagedBackgroundTasks via Depends for a clear, typed signature.
 @app.post("/webhook", summary="Queue a webhook processing task")
-def webhook(background_tasks: ManagedBackgroundTasks):
-    task_id = background_tasks.add_task(
-        process_webhook, {"event": "order.created", "id": 42}
+def webhook(tasks: ManagedBackgroundTasks = Depends(task_manager.get_tasks)):
+    task_id = tasks.add_task(
+        process_webhook,
+        {"event": "order.created", "id": 42},
+        tags={"source": "webhook"},
     )
     return {"queued": True, "task_id": task_id}

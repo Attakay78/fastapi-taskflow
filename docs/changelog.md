@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.5.0
+
+Adds pluggable observability, task context, tags, argument encryption, trace propagation, and opt-in concurrency controls for async and sync tasks.
+
+### Concurrency controls
+
+- Added `max_concurrent_tasks` on `TaskManager`. When set, an `asyncio.Semaphore` caps how many async tasks hold event loop time simultaneously. Tasks waiting for a slot are parked without blocking the event loop or delaying request handlers. Defaults to `None` (no limit, existing behaviour unchanged).
+- Added `max_sync_threads` on `TaskManager`. When set, sync task functions run in a dedicated `ThreadPoolExecutor` instead of the default asyncio thread pool, preventing sync task bursts from exhausting threads needed by sync request handlers. Defaults to `None` (existing behaviour unchanged).
+- Both parameters are opt-in. Neither changes any existing behaviour when not set.
+
+### Pluggable observability
+
+- Added `TaskObserver` ABC. Implement it to send task log and lifecycle events to any destination.
+- Added `FileLogger`, `StdoutLogger`, and `InMemoryLogger` built-in implementations.
+- `TaskManager` accepts a `loggers: list[TaskObserver]` parameter. All observers run independently via `LoggerChain`; an error in one never affects the others.
+- `task_log()` gains `level=` (`"debug"`, `"info"`, `"warning"`, `"error"`) and `**extra` keyword fields. Extra fields are forwarded to `LogEvent.extra` for structured log consumers. The old `task_log(message)` signature is unchanged.
+- `FileLogger` and `StdoutLogger` support `min_level=` filtering so low-severity entries can be suppressed without changing the task code.
+- `InMemoryLogger` captures `log_events` and `lifecycle_events` lists for test assertions.
+- The `log_file` shorthand on `TaskManager` remains fully supported.
+
+### Task context
+
+- Added `get_task_context()`. Returns a `TaskContext` dataclass (`task_id`, `func_name`, `attempt`, `tags`) from inside any code path invoked during task execution, including helper functions.
+- `TaskContext` is available in both sync and async tasks.
+
+### Tags
+
+- `add_task()` accepts an optional `tags: dict[str, str]` parameter. Tags are attached to the `TaskRecord` and forwarded to every `LogEvent` and `LifecycleEvent`.
+
+### Argument encryption
+
+- Added `encrypt_args_key` parameter to `TaskManager`. When set, task `args` and `kwargs` are encrypted with Fernet (AES-128-CBC + HMAC) at `add_task()` time and decrypted only inside the executor just before the function is called. They are never stored in plain text.
+- Requires `pip install "fastapi-taskflow[encryption]"`.
+- `SqliteBackend` and `RedisBackend` store the encrypted payload in a new `encrypted_payload` column/field with automatic migration.
+
+### task_log outside managed context
+
+- `task_log()` no longer silently drops calls made outside a managed task. It now forwards to the stdlib logger `fastapi_taskflow.task` at the matching level. Task functions work correctly in all call contexts (routes, scripts, cron jobs, direct test calls) without code changes.
+
+### Trace context propagation
+
+- `add_task()` captures the caller's `contextvars` context snapshot. On Python 3.11+, the task function runs inside this context so OpenTelemetry spans and other trace state flow from the enqueue site into background execution transparently. On Python 3.10, `task_log()` and `get_task_context()` still work correctly; full trace propagation requires Python 3.11+.
+
+---
+
 ## v0.4.1
 
 - Added docstrings with `Args:` and `Returns:` descriptions to all public classes, methods, and functions across the codebase.

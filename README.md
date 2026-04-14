@@ -36,7 +36,13 @@ fastapi-taskflow is a thin layer on top of what you already have. It does not co
 - `requeue_on_interrupt`: opt-in requeue for idempotent tasks interrupted mid-execution
 - Idempotency keys: prevent duplicate execution of the same logical operation
 - Multi-instance support: atomic requeue claiming, shared task history across instances
-- File logging: write task logs to a plain text file for use with `tail -f`, `grep`, and log shippers
+- `task_log(message, level=, **extra)`: structured log entries with level filtering and arbitrary extra fields
+- `get_task_context()`: access task metadata (task_id, attempt, tags) from any code path inside a running task
+- Tags: attach key/value labels at enqueue time, forwarded to every log and lifecycle event
+- Pluggable observers: `FileLogger`, `StdoutLogger`, `InMemoryLogger`, and custom `TaskObserver` implementations
+- Argument encryption: Fernet-based at-rest encryption for task args and kwargs
+- Trace context propagation: OpenTelemetry spans flow from the request into background execution (Python 3.11+)
+- Concurrency controls: opt-in semaphore for async tasks and dedicated thread pool for sync tasks
 - Zero-migration injection: keep your existing `BackgroundTasks` annotations
 - Both sync and async task functions supported
 
@@ -50,6 +56,12 @@ With Redis backend:
 
 ```bash
 pip install "fastapi-taskflow[redis]"
+```
+
+With argument encryption:
+
+```bash
+pip install "fastapi-taskflow[encryption]"
 ```
 
 ## Quick start
@@ -163,9 +175,103 @@ task_manager = TaskManager(
 - SQLite multi-instance only works when all processes share the same file path on the same host. It does not work across separate machines.
 - Tasks in `RUNNING` state at the time of a hard crash (SIGKILL, OOM) cannot be recovered. Only clean shutdowns trigger the pending store write.
 
+## Structured task logging
+
+`task_log()` accepts an optional `level=` and arbitrary `**extra` keyword fields. Extras are forwarded to observers as structured fields rather than embedded in the message string.
+
+```python
+from fastapi_taskflow import get_task_context, task_log
+
+@task_manager.task(retries=3)
+def process_order(order_id: int) -> None:
+    ctx = get_task_context()
+    task_log("Processing order", order_id=order_id, attempt=ctx.attempt if ctx else 0)
+    task_log("Payment gateway error", level="warning", order_id=order_id, code=503)
+```
+
+`get_task_context()` returns a `TaskContext` with `task_id`, `func_name`, `attempt`, and `tags` from any code path inside a running task.
+
+## Observability
+
+Pass one or more observers to `loggers=` to receive structured `LogEvent` and `LifecycleEvent` objects for every `task_log()` call and status transition:
+
+```python
+from fastapi_taskflow import FileLogger, StdoutLogger, TaskManager
+
+task_manager = TaskManager(
+    snapshot_db="tasks.db",
+    loggers=[
+        FileLogger("tasks.log", log_lifecycle=True),
+        StdoutLogger(log_lifecycle=True, min_level="warning"),
+    ],
+)
+```
+
+Built-in observers:
+
+| Observer | Description |
+|----------|-------------|
+| `FileLogger` | Rotating plain text file. Works with `tail -f`, `grep`, and log shippers. |
+| `StdoutLogger` | Prints to stdout. Suitable for containers with a log agent. |
+| `InMemoryLogger` | Captures events in memory for test assertions. |
+
+The `log_file` shorthand on `TaskManager` remains fully supported and creates a `FileLogger` internally.
+
+## Tags
+
+Attach key/value labels to a task at enqueue time. Tags flow through to every log and lifecycle event.
+
+```python
+task_id = tasks.add_task(
+    send_email,
+    address=email,
+    tags={"user_id": str(user_id), "source": "signup"},
+)
+```
+
+## Argument encryption
+
+When tasks carry sensitive data, encrypt args and kwargs at rest with Fernet:
+
+```python
+import os
+from fastapi_taskflow import TaskManager
+
+task_manager = TaskManager(
+    snapshot_db="tasks.db",
+    encrypt_args_key=os.environ["TASK_ENCRYPTION_KEY"],
+)
+```
+
+Generate a key:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Args and kwargs are encrypted at `add_task()` time and decrypted only inside the executor. They are never stored in plain text in the task store, the database, or any log file. Requires `pip install "fastapi-taskflow[encryption]"`.
+
+## Concurrency controls
+
+By default, tasks share the event loop and thread pool with request handlers. Under burst task load this can increase request latency. Both controls are opt-in and do not change existing behaviour when not set.
+
+**`max_concurrent_tasks`** — caps how many async tasks hold event loop time simultaneously via an `asyncio.Semaphore`. Tasks waiting for a slot are parked without blocking the loop.
+
+**`max_sync_threads`** — runs sync task functions in a dedicated `ThreadPoolExecutor`, isolated from the default pool used by sync request handlers.
+
+```python
+task_manager = TaskManager(
+    snapshot_db="tasks.db",
+    max_concurrent_tasks=10,
+    max_sync_threads=8,
+)
+```
+
+Both default to `None`. When not set, execution is identical to previous versions.
+
 ## File logging
 
-In addition to the dashboard, log entries can be written to a plain text file. This makes it easy to use standard tools like `tail -f`, `grep`, and log shippers (Loki, Datadog, Fluentd, CloudWatch) alongside the dashboard.
+In addition to the observer system, a plain text log file can be configured directly on `TaskManager`:
 
 ```python
 task_manager = TaskManager(
@@ -175,17 +281,7 @@ task_manager = TaskManager(
 )
 ```
 
-Each line has the format `[task_id] [func_name] 2024-01-01T12:00:00 message`. With `log_lifecycle=True`, status transitions (`RUNNING`, `SUCCESS`, `FAILED`, `INTERRUPTED`) are also written.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `log_file` | `str` | `None` | Path to the log file. File logging is disabled when not set. |
-| `log_file_max_bytes` | `int` | `10485760` | Maximum file size before rotating. Ignored in `watched` mode. |
-| `log_file_backup_count` | `int` | `5` | Number of rotated backup files to keep. Ignored in `watched` mode. |
-| `log_file_mode` | `str` | `"rotate"` | `"rotate"` for automatic rotation; `"watched"` for external rotation via logrotate. |
-| `log_lifecycle` | `bool` | `False` | Write a line on each task status transition. |
-
-For multi-process or multi-host deployments see the [file logging guide](docs/guide/logging.md#file-logging).
+Each line has the format `[task_id] [func_name] 2026-01-01T12:00:00 message`. For multi-process or multi-host deployments see the [file logging guide](docs/guide/file-logging.md).
 
 ## What this is not
 

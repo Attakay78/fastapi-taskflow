@@ -74,6 +74,14 @@ class TaskRecord:
         stacktrace: Full traceback of the last failure, if the task failed.
         idempotency_key: Caller-provided key used to deduplicate tasks.
             See :meth:`~fastapi_taskflow.wrapper.ManagedBackgroundTasks.add_task`.
+        tags: Key/value labels attached at enqueue time. Forwarded to every
+            :class:`~fastapi_taskflow.loggers.LogEvent` and
+            :class:`~fastapi_taskflow.loggers.LifecycleEvent` so observers can
+            use them as metric labels or structured fields.
+        encrypted_payload: Fernet-encrypted blob of ``(args, kwargs)`` when
+            ``encrypt_args_key`` is set on the ``TaskManager``. When present,
+            ``args`` and ``kwargs`` are stored empty and the executor decrypts
+            this field before calling the function.
     """
 
     task_id: str
@@ -89,6 +97,8 @@ class TaskRecord:
     logs: list[str] = field(default_factory=list)
     stacktrace: str | None = None
     idempotency_key: str | None = None
+    tags: dict[str, str] = field(default_factory=dict)
+    encrypted_payload: bytes | None = field(default=None)
 
     @property
     def duration(self) -> float | None:
@@ -112,4 +122,5 @@ class TaskRecord:
             "error": self.error,
             "logs": list(self.logs),
             "stacktrace": self.stacktrace,
+            "tags": dict(self.tags),
         }

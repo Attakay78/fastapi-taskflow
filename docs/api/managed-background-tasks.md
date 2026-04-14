@@ -17,7 +17,7 @@ When constructed via a dependency or `install()`, FastAPI passes its native `Bac
 
 ## Methods
 
-### `add_task(func, *args, **kwargs) -> str`
+### `add_task(func, *args, idempotency_key=None, tags=None, **kwargs) -> str`
 
 Enqueues a function as a managed background task. Returns the `task_id` UUID string.
 
@@ -26,6 +26,16 @@ This overrides `BackgroundTasks.add_task` which returns `None`. If you are captu
 ```python
 task_id = background_tasks.add_task(send_email, address=email)
 ```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `func` | `Callable` | required | The task function to run. Must be registered with `@task_manager.task()` to get retries and config applied. |
+| `*args` | | | Positional arguments forwarded to `func`. |
+| `idempotency_key` | `str \| None` | `None` | Deduplication key. If a non-failed task with the same key already exists, its `task_id` is returned and `func` is not enqueued again. |
+| `tags` | `dict[str, str] \| None` | `None` | Key/value labels attached to this task. Forwarded to every `LogEvent` and `LifecycleEvent`. |
+| `**kwargs` | | | Keyword arguments forwarded to `func`. |
 
 ## Direct construction
 

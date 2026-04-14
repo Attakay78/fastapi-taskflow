@@ -1,3 +1,5 @@
+import contextvars
+import pickle
 import uuid
 from typing import Any, Callable, Optional
 
@@ -56,6 +58,7 @@ class ManagedBackgroundTasks(BackgroundTasks):
         func: Callable,
         *args: Any,
         idempotency_key: Optional[str] = None,
+        tags: Optional[dict[str, str]] = None,
         **kwargs: Any,
     ) -> str:
         """Enqueue *func* as a managed background task and return its ``task_id``.
@@ -70,6 +73,10 @@ class ManagedBackgroundTasks(BackgroundTasks):
                 is returned immediately and *func* is not enqueued again. When a
                 shared backend is configured, the key is also checked there to
                 prevent duplicate execution across multiple instances.
+            tags: Key/value labels attached to this task invocation. Forwarded to
+                every :class:`~fastapi_taskflow.loggers.LogEvent` and
+                :class:`~fastapi_taskflow.loggers.LifecycleEvent` emitted for this
+                task, allowing observers to slice metrics or logs by label.
             **kwargs: Keyword arguments forwarded to *func*.
 
         Returns:
@@ -84,11 +91,32 @@ class ManagedBackgroundTasks(BackgroundTasks):
         task_id = str(uuid.uuid4())
         config = self._task_manager.registry.get_config(func) or TaskConfig()
 
+        # Capture the caller's contextvars context for trace context propagation.
+        # This snapshot is taken here (in the request handler) so OTel spans and
+        # other trace state flow into the background execution transparently.
+        captured_ctx = contextvars.copy_context()
+
+        # Encrypt args/kwargs if an encryption key is configured.
+        fernet = self._task_manager.fernet
+        if fernet is not None:
+            encrypted_payload = fernet.encrypt(pickle.dumps((args, kwargs)))
+            store_args: tuple = ()
+            store_kwargs: dict = {}
+        else:
+            encrypted_payload = None
+            store_args = args
+            store_kwargs = kwargs
+
         self._task_manager.store.create(
-            task_id, func.__name__, args, kwargs, idempotency_key=idempotency_key
+            task_id,
+            func.__name__,
+            store_args,
+            store_kwargs,
+            idempotency_key=idempotency_key,
+            tags=tags,
+            encrypted_payload=encrypted_payload,
         )
 
-        # Wire up backend and on_success callback when a scheduler is present.
         scheduler = self._task_manager._scheduler
         backend = scheduler._backend if scheduler is not None else None
         on_success = scheduler.flush_one if scheduler is not None else None
@@ -98,11 +126,15 @@ class ManagedBackgroundTasks(BackgroundTasks):
             task_id,
             config,
             self._task_manager.store,
-            args,
-            kwargs,
+            store_args,
+            store_kwargs,
             backend=backend,
             on_success=on_success,
-            file_logger=self._task_manager.file_logger,
+            logger=self._task_manager.logger,
+            encryptor=fernet,
+            captured_ctx=captured_ctx,
+            semaphore=self._task_manager._task_semaphore,
+            sync_executor=self._task_manager._sync_executor,
         )
 
         super().add_task(wrapped)  # appends to self.tasks (shared with native if set)

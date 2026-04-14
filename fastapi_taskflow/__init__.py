@@ -26,11 +26,19 @@ Quick start::
 from .admin import TaskAdmin
 from .auth import TaskAuthBackend
 from .backends import RedisBackend, SnapshotBackend, SqliteBackend
-from .file_logger import TaskFileLogger
+from .loggers import (
+    FileLogger,
+    InMemoryLogger,
+    LifecycleEvent,
+    LogEvent,
+    LoggerChain,
+    StdoutLogger,
+    TaskObserver,
+)
 from .manager import TaskManager
 from .models import TaskConfig, TaskRecord, TaskStatus
 from .snapshot import SnapshotScheduler
-from .task_logging import task_log
+from .task_logging import TaskContext, get_task_context, task_log
 from .wrapper import ManagedBackgroundTasks
 
 __all__ = [
@@ -45,8 +53,18 @@ __all__ = [
     "SnapshotBackend",
     "SqliteBackend",
     "RedisBackend",
-    "TaskFileLogger",
+    # Logging
+    "TaskObserver",
+    "LogEvent",
+    "LifecycleEvent",
+    "LoggerChain",
+    "FileLogger",
+    "InMemoryLogger",
+    "StdoutLogger",
+    # Task logging
     "task_log",
+    "TaskContext",
+    "get_task_context",
 ]
 
 try:

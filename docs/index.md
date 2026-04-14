@@ -154,13 +154,37 @@ def signup(email: str, background_tasks: BackgroundTasks):
   <div class="feature-card">
     <span class="icon">≡</span>
     <h3>Task Logging</h3>
-    <p>Call <code>task_log()</code> inside any task to capture timestamped log entries. Logs and full stack traces appear in the dashboard detail panel.</p>
+    <p>Call <code>task_log(message, level=, **extra)</code> inside any task. Structured extras flow to observers. Logs and stack traces appear in the dashboard detail panel.</p>
+  </div>
+
+  <div class="feature-card">
+    <span class="icon">◎</span>
+    <h3>Pluggable Observers</h3>
+    <p><code>FileLogger</code>, <code>StdoutLogger</code>, and <code>InMemoryLogger</code> out of the box. Implement <code>TaskObserver</code> to send events anywhere. Multiple observers run independently.</p>
   </div>
 
   <div class="feature-card">
     <span class="icon">&#9783;</span>
     <h3>File Logging</h3>
     <p>Write task logs to a plain text file alongside the dashboard. Works with <code>tail -f</code>, <code>grep</code>, and any log shipper (Loki, Datadog, Fluentd, CloudWatch). Supports automatic rotation and external rotation via logrotate.</p>
+  </div>
+
+  <div class="feature-card">
+    <span class="icon">⊙</span>
+    <h3>Task Context</h3>
+    <p>Call <code>get_task_context()</code> from anywhere in the call stack to access the current task's ID, function name, retry attempt, and tags without threading state through parameters.</p>
+  </div>
+
+  <div class="feature-card">
+    <span class="icon">⬡</span>
+    <h3>Tags</h3>
+    <p>Attach key/value labels at enqueue time with <code>tags=</code>. Tags flow through to every log and lifecycle event, enabling label-based filtering in downstream log aggregators.</p>
+  </div>
+
+  <div class="feature-card">
+    <span class="icon">⊘</span>
+    <h3>Argument Encryption</h3>
+    <p>Set <code>encrypt_args_key</code> to encrypt task args and kwargs with Fernet at enqueue time. Sensitive data is never stored in plain text in the task store, database, or log files.</p>
   </div>
 
   <div class="feature-card">

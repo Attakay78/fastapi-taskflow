@@ -144,7 +144,7 @@ def create_router(
         from .executor import make_background_func
 
         task_manager.store.create(
-            new_task_id, func.__name__, record.args, record.kwargs
+            new_task_id, func.__name__, record.args, record.kwargs, tags=record.tags
         )
 
         wrapped = make_background_func(
@@ -156,7 +156,10 @@ def create_router(
             record.kwargs,
             backend=backend,
             on_success=on_success,
-            file_logger=task_manager.file_logger,
+            logger=task_manager.logger,
+            encryptor=task_manager.fernet,
+            semaphore=task_manager._task_semaphore,
+            sync_executor=task_manager._sync_executor,
         )
 
         # Schedule via asyncio directly since we have no BackgroundTasks instance here.
