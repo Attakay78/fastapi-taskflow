@@ -5,6 +5,8 @@ By default, fastapi-taskflow holds all task state in memory. When the app restar
 ## SQLite (default)
 
 ```python
+from fastapi_taskflow import TaskManager
+
 task_manager = TaskManager(snapshot_db="tasks.db", snapshot_interval=30.0)
 ```
 
@@ -19,6 +21,7 @@ pip install "fastapi-taskflow[redis]"
 ```
 
 ```python
+from fastapi_taskflow import TaskManager
 from fastapi_taskflow.backends import RedisBackend
 
 backend = RedisBackend("redis://localhost:6379/0")
@@ -86,6 +89,12 @@ records = task_manager._scheduler.query(
 ## Showing arguments in the dashboard
 
 ```python
+from fastapi import FastAPI
+from fastapi_taskflow import TaskAdmin, TaskManager
+
+task_manager = TaskManager(snapshot_db="tasks.db")
+app = FastAPI()
+
 TaskAdmin(app, task_manager, display_func_args=True)
 ```
 

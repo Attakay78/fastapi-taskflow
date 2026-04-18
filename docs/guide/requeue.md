@@ -5,6 +5,8 @@ When an app shuts down, tasks that had not finished are saved and re-dispatched 
 ## Enable requeue
 
 ```python
+from fastapi_taskflow import TaskManager
+
 task_manager = TaskManager(
     snapshot_db="tasks.db",
     requeue_pending=True,
@@ -27,6 +29,10 @@ The default behaviour is to save `RUNNING` tasks to history with status `INTERRU
 If a task is safe to run from scratch even if it was partially executed (for example, a database sync using upserts), you can opt in to requeue on interrupt:
 
 ```python
+from fastapi_taskflow import TaskManager
+
+task_manager = TaskManager(snapshot_db="tasks.db", requeue_pending=True)
+
 @task_manager.task(retries=2, requeue_on_interrupt=True)
 def sync_user_data(user_id: int) -> None:
     # uses upsert semantics -- safe to run twice
@@ -38,6 +44,10 @@ Tasks marked `requeue_on_interrupt=True` are saved as `PENDING` and re-dispatche
 Tasks without the flag are saved as `INTERRUPTED` and are not re-dispatched.
 
 ```python
+from fastapi_taskflow import TaskManager
+
+task_manager = TaskManager(snapshot_db="tasks.db", requeue_pending=True)
+
 @task_manager.task(retries=3)
 def send_welcome_email(user_id: int) -> None:
     # sends an email -- not safe to run twice

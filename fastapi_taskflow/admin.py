@@ -56,6 +56,7 @@ class TaskAdmin:
         token_expiry: int = 86400,
         secret_key: str | None = None,
         poll_interval: float = 30.0,
+        title: str = "fastapi-taskflow",
     ) -> None:
         """
         Args:
@@ -80,6 +81,8 @@ class TaskAdmin:
                 Pass an explicit value to keep sessions valid across restarts.
             poll_interval: How often (seconds) the dashboard polls for updates when
                 SSE is unavailable. Default is 30 seconds.
+            title: Display name shown in the dashboard header badge and on the login
+                page. Defaults to ``"fastapi-taskflow"``.
         """
         self._task_manager = task_manager
 
@@ -102,7 +105,9 @@ class TaskAdmin:
             from .auth import create_auth_router
 
             app.include_router(
-                create_auth_router(backend, resolved_secret, token_expiry, prefix=path)
+                create_auth_router(
+                    backend, resolved_secret, token_expiry, prefix=path, title=title
+                )
             )
 
         # Dashboard must be registered before the main router so that
@@ -115,6 +120,7 @@ class TaskAdmin:
                 secret_key=resolved_secret,
                 login_path=f"{path}/auth/login" if backend is not None else None,
                 poll_interval=poll_interval,
+                title=title,
             )
         )
         app.include_router(

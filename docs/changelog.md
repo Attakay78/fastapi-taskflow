@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.5.1
+
+Dashboard login screen updated to match the teal theme. `TaskAdmin` gains a `title` parameter to customise the display name shown in the dashboard header and login page.
+
+---
+
 ## v0.5.0
 
 Adds pluggable observability, task context, tags, argument encryption, trace propagation, and opt-in concurrency controls for async and sync tasks.

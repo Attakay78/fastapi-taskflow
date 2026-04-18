@@ -28,7 +28,7 @@ COOKIE_NAME = "taskflow_token"
 _FAVICON = (
     "data:image/svg+xml,"
     "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'>"
-    "<rect width='200' height='200' rx='40' ry='40' fill='%23111111'/>"
+    "<rect width='200' height='200' rx='40' ry='40' fill='%23009688'/>"
     "<polyline points='20,100 55,100 80,145 120,55 145,100 180,100' "
     "fill='none' stroke='white' stroke-width='18' "
     "stroke-linecap='round' stroke-linejoin='round'/></svg>"
@@ -199,7 +199,7 @@ def make_api_guard(secret_key: str):
 # ---------------------------------------------------------------------------
 
 
-def _login_html(action: str, error: str = "") -> str:
+def _login_html(action: str, error: str = "", title: str = "fastapi-taskflow") -> str:
     error_block = f'<div class="error">{error}</div>' if error else ""
     return f"""\
 <!DOCTYPE html>
@@ -207,7 +207,7 @@ def _login_html(action: str, error: str = "") -> str:
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sign in \u00b7 fastapi-taskflow</title>
+  <title>Sign in \u00b7 {title}</title>
   <link rel="icon" type="image/svg+xml" href="{_FAVICON}">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -216,7 +216,7 @@ def _login_html(action: str, error: str = "") -> str:
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
       font-family: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: #f5f5f5;
+      background: #f0faf9;
       min-height: 100vh;
       display: flex;
       align-items: center;
@@ -225,11 +225,12 @@ def _login_html(action: str, error: str = "") -> str:
     }}
     .card {{
       background: #fff;
-      border: 1px solid #e5e7eb;
+      border: 1px solid #b2dfdb;
       border-radius: 12px;
       padding: 2rem;
       width: 100%;
       max-width: 360px;
+      box-shadow: 0 4px 24px rgba(0,150,136,.08);
     }}
     .logo-row {{
       display: flex;
@@ -241,7 +242,7 @@ def _login_html(action: str, error: str = "") -> str:
       font-size: 15px;
       font-weight: 700;
       letter-spacing: -0.02em;
-      color: #111;
+      color: #00695c;
     }}
     label {{
       display: block;
@@ -253,7 +254,7 @@ def _login_html(action: str, error: str = "") -> str:
     input[type=text], input[type=password] {{
       width: 100%;
       padding: 8px 12px;
-      border: 1px solid #d1d5db;
+      border: 1px solid #b2dfdb;
       border-radius: 7px;
       font-size: 14px;
       font-family: inherit;
@@ -263,11 +264,11 @@ def _login_html(action: str, error: str = "") -> str:
       transition: border-color .15s;
       margin-bottom: 1rem;
     }}
-    input:focus {{ border-color: #111; box-shadow: 0 0 0 3px rgba(0,0,0,.06); }}
+    input:focus {{ border-color: #009688; box-shadow: 0 0 0 3px rgba(0,150,136,.12); }}
     button {{
       width: 100%;
       padding: 9px;
-      background: #111;
+      background: #009688;
       color: #fff;
       border: none;
       border-radius: 7px;
@@ -275,9 +276,9 @@ def _login_html(action: str, error: str = "") -> str:
       font-weight: 600;
       font-family: inherit;
       cursor: pointer;
-      transition: opacity .15s;
+      transition: background .15s;
     }}
-    button:hover {{ opacity: 0.82; }}
+    button:hover {{ background: #00796b; }}
     .error {{
       background: #fef2f2;
       border: 1px solid #fecaca;
@@ -293,12 +294,12 @@ def _login_html(action: str, error: str = "") -> str:
   <div class="card">
     <div class="logo-row">
       <svg width="28" height="28" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
-        <rect width="200" height="200" rx="40" ry="40" fill="#111111"/>
+        <rect width="200" height="200" rx="40" ry="40" fill="#009688"/>
         <polyline points="20,100 55,100 80,145 120,55 145,100 180,100"
           fill="none" stroke="white" stroke-width="18"
           stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      <span class="logo-title">fastapi-taskflow</span>
+      <span class="logo-title">{title}</span>
     </div>
     {error_block}
     <form method="post" action="{action}">
@@ -325,6 +326,7 @@ def create_auth_router(
     secret_key: str,
     token_expiry: int,
     prefix: str,
+    title: str = "fastapi-taskflow",
 ) -> APIRouter:
     """Build the login/logout router for the dashboard.
 
@@ -333,6 +335,7 @@ def create_auth_router(
         secret_key: HMAC secret for signing session tokens.
         token_expiry: Token lifetime in seconds.
         prefix: URL prefix (e.g. ``"/tasks"``) prepended to all auth routes.
+        title: Display name shown on the login page.
 
     Returns:
         An :class:`~fastapi.APIRouter` with ``GET /auth/login``,
@@ -344,7 +347,7 @@ def create_auth_router(
 
     @router.get("/auth/login", response_class=HTMLResponse)
     def login_page() -> HTMLResponse:
-        return HTMLResponse(_login_html(action=login_path))
+        return HTMLResponse(_login_html(action=login_path, title=title))
 
     @router.post("/auth/login", response_class=HTMLResponse)
     async def login(
@@ -363,7 +366,9 @@ def create_auth_router(
             )
             return response
         return HTMLResponse(
-            _login_html(action=login_path, error="Invalid username or password."),
+            _login_html(
+                action=login_path, error="Invalid username or password.", title=title
+            ),
             status_code=401,
         )
 

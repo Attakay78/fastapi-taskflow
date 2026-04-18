@@ -269,6 +269,14 @@ task_manager = TaskManager(
 
 Both default to `None`. When not set, execution is identical to previous versions.
 
+## Custom dashboard title
+
+Replace the "fastapi-taskflow" label in the dashboard header and login page with your own app name:
+
+```python
+TaskAdmin(app, task_manager, title="My App")
+```
+
 ## File logging
 
 In addition to the observer system, a plain text log file can be configured directly on `TaskManager`:

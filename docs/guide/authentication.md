@@ -7,6 +7,7 @@ By default, the dashboard and task API endpoints are open. Pass an `auth` argume
 ### Single user
 
 ```python
+from fastapi import FastAPI
 from fastapi_taskflow import TaskAdmin, TaskManager
 
 task_manager = TaskManager()
@@ -18,6 +19,12 @@ TaskAdmin(app, task_manager, auth=("admin", "secret"))
 ### Multiple users
 
 ```python
+from fastapi import FastAPI
+from fastapi_taskflow import TaskAdmin, TaskManager
+
+task_manager = TaskManager()
+app = FastAPI()
+
 TaskAdmin(app, task_manager, auth=[
     ("alice", "password1"),
     ("bob",   "password2"),
@@ -49,6 +56,12 @@ Authentication uses HMAC-SHA256 signed tokens stored as HTTP-only cookies.
 | `secret_key` | `None` | Signing key. Auto-generated if not set. |
 
 ```python
+from fastapi import FastAPI
+from fastapi_taskflow import TaskAdmin, TaskManager
+
+task_manager = TaskManager()
+app = FastAPI()
+
 TaskAdmin(
     app,
     task_manager,
@@ -82,5 +95,11 @@ The login page is served at `{path}/auth/login` and matches the dashboard's visu
 Set `auth=None` (the default) to serve all routes without any authentication:
 
 ```python
+from fastapi import FastAPI
+from fastapi_taskflow import TaskAdmin, TaskManager
+
+task_manager = TaskManager()
+app = FastAPI()
+
 TaskAdmin(app, task_manager)  # no auth
 ```

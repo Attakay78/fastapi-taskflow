@@ -102,6 +102,9 @@ mem_logger.clear()
 Pass a list to `loggers=` to fan out to multiple observers simultaneously. All run independently: an error in one never affects the others.
 
 ```python
+from fastapi_taskflow import TaskManager
+from fastapi_taskflow.loggers import FileLogger, StdoutLogger
+
 task_manager = TaskManager(
     snapshot_db="tasks.db",
     loggers=[
@@ -116,6 +119,12 @@ task_manager = TaskManager(
 Attach key/value labels to a task at enqueue time with `tags=`. Tags flow through to every `LogEvent` and `LifecycleEvent` emitted for that task, so downstream systems can filter logs by label without parsing message strings.
 
 ```python
+from fastapi import Depends, FastAPI
+from fastapi_taskflow import TaskManager
+
+task_manager = TaskManager()
+app = FastAPI()
+
 @app.post("/invoice")
 def create_invoice(user_id: int, tasks=Depends(task_manager.get_tasks)):
     task_id = tasks.add_task(
@@ -143,6 +152,9 @@ def process_invoice(user_id: int) -> None:
 If you only need a single `FileLogger`, use the `log_file` shorthand on `TaskManager` instead of constructing `FileLogger` manually:
 
 ```python
+from fastapi_taskflow import TaskManager
+from fastapi_taskflow.loggers import FileLogger
+
 # shorthand
 task_manager = TaskManager(
     snapshot_db="tasks.db",
@@ -197,6 +209,8 @@ class MyObserver(TaskObserver):
     async def close(self) -> None:
         await my_log_service.disconnect()
 
+
+from fastapi_taskflow import TaskManager
 
 task_manager = TaskManager(loggers=[MyObserver()])
 ```

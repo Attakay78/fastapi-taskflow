@@ -15,6 +15,8 @@ Two opt-in parameters let you control this. Neither changes existing behaviour w
 Caps how many async tasks run concurrently on the event loop using an `asyncio.Semaphore`.
 
 ```python
+from fastapi_taskflow import TaskManager
+
 task_manager = TaskManager(
     snapshot_db="tasks.db",
     max_concurrent_tasks=10,
@@ -32,6 +34,8 @@ Tasks do not slow down once they start. They only wait before starting if the li
 Runs sync task functions in a dedicated `ThreadPoolExecutor` instead of the default asyncio pool.
 
 ```python
+from fastapi_taskflow import TaskManager
+
 task_manager = TaskManager(
     snapshot_db="tasks.db",
     max_sync_threads=8,

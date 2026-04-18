@@ -15,6 +15,7 @@ TaskAdmin(
     token_expiry: int = 86400,
     secret_key: str | None = None,
     poll_interval: float = 30.0,
+    title: str = "fastapi-taskflow",
 )
 ```
 
@@ -29,6 +30,7 @@ TaskAdmin(
 | `token_expiry` | `int` | `86400` | Seconds before an issued session token expires. |
 | `secret_key` | `str \| None` | `None` | HMAC signing key for tokens. Auto-generated if `None` and auth is configured. |
 | `poll_interval` | `float` | `30.0` | Seconds between dashboard poll requests when SSE is unavailable. |
+| `title` | `str` | `"fastapi-taskflow"` | Display name shown in the dashboard header badge and on the login page. |
 
 ## Usage
 

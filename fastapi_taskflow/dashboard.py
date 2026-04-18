@@ -562,7 +562,7 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
     <polyline points="20,100 55,100 80,145 120,55 145,100 180,100" fill="none" stroke="white" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>
   <span class="header-title">Task Dashboard</span>
-  <span class="header-badge">fastapi-taskflow</span>
+  <span class="header-badge">__TITLE__</span>
   <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
     <span class="dot dot--connecting" id="live-dot"></span>
     <span class="status-label" id="live-label">Connecting&#8230;</span>
@@ -1330,6 +1330,7 @@ def _dashboard_page(
     base_path: str,
     show_args: bool = False,
     logout_url: str | None = None,
+    title: str = "fastapi-taskflow",
 ) -> str:
     stream_url = f"{base_path}/dashboard/stream"
     logout_btn = (
@@ -1340,6 +1341,7 @@ def _dashboard_page(
         .replace("__TASKS_PREFIX__", base_path)
         .replace("__SHOW_ARGS__", "true" if show_args else "false")
         .replace("__LOGOUT_BUTTON__", logout_btn)
+        .replace("__TITLE__", title)
     )
 
 
@@ -1355,6 +1357,7 @@ def create_dashboard_router(
     secret_key: str | None = None,
     login_path: str | None = None,
     poll_interval: float = 30.0,
+    title: str = "fastapi-taskflow",
 ) -> APIRouter:
     from fastapi.responses import RedirectResponse as _Redirect
 
@@ -1379,7 +1382,9 @@ def create_dashboard_router(
             assert login_path is not None
             return _Redirect(url=login_path, status_code=302)
         return HTMLResponse(
-            _dashboard_page(prefix, show_args=display_func_args, logout_url=logout_url)
+            _dashboard_page(
+                prefix, show_args=display_func_args, logout_url=logout_url, title=title
+            )
         )
 
     @router.get("/stream")

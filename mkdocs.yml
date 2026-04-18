@@ -65,6 +65,8 @@ nav:
     - Installation: getting-started/installation.md
     - Quick Start: getting-started/quickstart.md
   - Guide:
+    - Setting Up TaskManager: guide/task-manager.md
+    - Setting Up TaskAdmin: guide/task-admin.md
     - Defining Tasks: guide/defining-tasks.md
     - Injection Patterns: guide/injection.md
     - Adding Tasks: guide/adding-tasks.md

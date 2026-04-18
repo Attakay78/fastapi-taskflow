@@ -5,6 +5,10 @@ Tasks are registered using the `@task_manager.task()` decorator. The decorator s
 ## Basic definition
 
 ```python
+from fastapi_taskflow import TaskManager
+
+task_manager = TaskManager()
+
 @task_manager.task()
 def send_email(address: str) -> None:
     ...
@@ -26,6 +30,10 @@ Without any arguments, the task runs once with no retries.
 ## Retry example
 
 ```python
+from fastapi_taskflow import TaskManager
+
+task_manager = TaskManager()
+
 @task_manager.task(retries=3, delay=1.0, backoff=2.0)
 def send_email(address: str) -> None:
     ...
@@ -36,6 +44,10 @@ On failure this task will retry up to 3 times with delays of 1s, 2s, and 4s.
 ## Async tasks
 
 ```python
+from fastapi_taskflow import TaskManager
+
+task_manager = TaskManager()
+
 @task_manager.task(retries=1, delay=0.5)
 async def process_webhook(payload: dict) -> None:
     await some_http_client.post("/endpoint", json=payload)
@@ -67,8 +79,11 @@ stateDiagram-v2
 You can call `add_task` with a plain function that has no decorator. It will still be tracked with a UUID and a default config (no retries). The decorator is only required if you want retry behaviour or persistence.
 
 ```python
+from fastapi import BackgroundTasks
+
 def plain_work() -> None:
     ...
 
+background_tasks = BackgroundTasks()
 background_tasks.add_task(plain_work)  # tracked, no retries
 ```

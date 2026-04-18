@@ -83,6 +83,12 @@ async def async_task(user_id: int) -> None:
 Tags attached at enqueue time are available on `ctx.tags`:
 
 ```python
+from fastapi import Depends, FastAPI
+from fastapi_taskflow import TaskManager, get_task_context, task_log
+
+task_manager = TaskManager()
+app = FastAPI()
+
 @app.post("/report")
 def queue_report(user_id: int, plan: str, tasks=Depends(task_manager.get_tasks)):
     tasks.add_task(
