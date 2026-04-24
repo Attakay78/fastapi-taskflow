@@ -246,7 +246,8 @@ class PeriodicScheduler:
         lock_key = f"schedule:{entry.func.__name__}"
         # Hold the lock for one full interval so a second instance cannot
         # fire the same entry while the first is still running.
-        lock_ttl = int(entry.every if entry.every is not None else 60)
+        # max(1, ...) prevents sub-second intervals from producing a 0s TTL.
+        lock_ttl = max(1, int(entry.every if entry.every is not None else 60))
 
         if self._backend is not None:
             acquired = await self._backend.acquire_schedule_lock(lock_key, lock_ttl)

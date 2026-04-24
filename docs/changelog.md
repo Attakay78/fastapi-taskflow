@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.6.1
+
+Fixed a bug where the distributed schedule lock was issued with a zero-second TTL for sub-second intervals, causing both instances to fire the same entry on every tick. The lock TTL now has a minimum of 1 second.
+
+---
+
 ## v0.6.0
 
 Adds a periodic task scheduler with interval and cron triggers, distributed locking for multi-instance deployments, dashboard differentiation between scheduled and manual runs, and `TaskManager.init_app()` for lifecycle registration without `TaskAdmin`.

@@ -1,10 +1,10 @@
 name: Release
 
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [main]
-    paths:
-      - "pyproject.toml"
   workflow_dispatch:
 
 concurrency:
@@ -15,6 +15,11 @@ jobs:
   # ── 1. Check whether this push actually bumped the version ──────────────────
   check-version:
     name: Check version bump
+    # For workflow_run: only proceed if CI passed.
+    # For workflow_dispatch: always proceed (manual trigger).
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.get-version.outputs.version }}
@@ -49,38 +54,10 @@ jobs:
             echo "should-release=true" >> "$GITHUB_OUTPUT"
           fi
 
-  # ── 2. CI gate (always runs) ───────────────────────────────────────────────
-  ci-gate:
-    name: CI gate
-    needs: check-version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - uses: astral-sh/setup-uv@v4
-
-      - name: Install dependencies
-        run: uv pip install --system -e ".[redis,dev]" ruff mypy
-
-      - name: Lint
-        run: |
-          ruff check .
-          ruff format --check .
-
-      - name: Type check
-        run: mypy fastapi_taskflow/ --ignore-missing-imports
-
-      - name: Tests
-        run: pytest --tb=short -q
-
-  # ── 3. Build distribution ──────────────────────────────────────────────────
+  # ── 2. Build distribution ──────────────────────────────────────────────────
   build:
     name: Build distribution
-    needs: [check-version, ci-gate]
+    needs: check-version
     if: needs.check-version.outputs.should-release == 'true'
     runs-on: ubuntu-latest
     steps:
