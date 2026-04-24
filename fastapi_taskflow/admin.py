@@ -35,14 +35,16 @@ class TaskAdmin:
 
     Routes mounted (relative to *path*):
 
-    * ``GET  {path}``               -- JSON list of all tasks
-    * ``GET  {path}/metrics``       -- aggregated statistics
-    * ``GET  {path}/{task_id}``     -- single task detail
-    * ``POST {path}/{task_id}/retry`` -- retry a failed/interrupted task
-    * ``GET  {path}/dashboard``     -- live HTML dashboard
-    * ``GET  {path}/auth/login``    -- login page (when *auth* is set)
-    * ``POST {path}/auth/login``    -- process login form
-    * ``GET  {path}/auth/logout``   -- clear session cookie
+    * ``GET  {path}``                  -- JSON list of all tasks
+    * ``GET  {path}/metrics``          -- aggregated statistics
+    * ``GET  {path}/{task_id}``        -- single task detail
+    * ``POST {path}/{task_id}/retry``  -- retry a failed/interrupted task
+    * ``POST {path}/{task_id}/cancel`` -- cancel a pending task
+    * ``GET  {path}/audit``            -- audit log (when *auth* is set)
+    * ``GET  {path}/dashboard``        -- live HTML dashboard
+    * ``GET  {path}/auth/login``       -- login page (when *auth* is set)
+    * ``POST {path}/auth/login``       -- process login form
+    * ``GET  {path}/auth/logout``      -- clear session cookie
     """
 
     def __init__(
@@ -57,6 +59,7 @@ class TaskAdmin:
         secret_key: str | None = None,
         poll_interval: float = 30.0,
         title: str = "fastapi-taskflow",
+        retention_days: float | None = None,
     ) -> None:
         """
         Args:
@@ -83,11 +86,16 @@ class TaskAdmin:
                 SSE is unavailable. Default is 30 seconds.
             title: Display name shown in the dashboard header badge and on the login
                 page. Defaults to ``"fastapi-taskflow"``.
+            retention_days: Override the retention policy set on *task_manager*.
+                Terminal task records older than this many days are pruned
+                automatically every ~6 hours. ``None`` leaves the manager's
+                setting unchanged.
         """
-        self._task_manager = task_manager
-
         if auto_install:
             task_manager.install(app)
+
+        if retention_days is not None and task_manager._scheduler is not None:
+            task_manager._scheduler._retention_days = retention_days
 
         from .auth import resolve_backend
 
@@ -131,13 +139,4 @@ class TaskAdmin:
             )
         )
 
-        app.router.on_startup.append(self._on_startup)
-        app.router.on_shutdown.append(self._on_shutdown)
-
-    async def _on_startup(self) -> None:
-        """Delegate app startup to :meth:`~fastapi_taskflow.manager.TaskManager.startup`."""
-        await self._task_manager.startup()
-
-    async def _on_shutdown(self) -> None:
-        """Delegate app shutdown to :meth:`~fastapi_taskflow.manager.TaskManager.shutdown`."""
-        await self._task_manager.shutdown()
+        task_manager.init_app(app)

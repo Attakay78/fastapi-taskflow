@@ -23,8 +23,11 @@ from typing import TYPE_CHECKING, AsyncIterator
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 
+from .auth import verify_token, COOKIE_NAME
+
 if TYPE_CHECKING:
     from .manager import TaskManager
+    from .models import TaskRecord
 
 # ---------------------------------------------------------------------------
 # HTML fragment helpers (used by /metrics and /tasks HTTP endpoints)
@@ -36,6 +39,7 @@ _STATUS_COLOR = {
     "success": ("#f0fdf4", "#16a34a"),
     "failed": ("#fef2f2", "#dc2626"),
     "interrupted": ("#fffbeb", "#d97706"),
+    "cancelled": ("#fce7f3", "#be185d"),
 }
 
 
@@ -65,18 +69,20 @@ def _render_metrics(tasks: list) -> str:
     running = sum(1 for t in tasks if t.status.value == "running")
     pending = sum(1 for t in tasks if t.status.value == "pending")
     interrupted = sum(1 for t in tasks if t.status.value == "interrupted")
+    cancelled = sum(1 for t in tasks if t.status.value == "cancelled")
     rate = f"{success / total * 100:.1f}%" if total else "—"
     durs = [t.duration for t in tasks if t.duration is not None]
     avg = f"{sum(durs) / len(durs) * 1000:.0f} ms" if durs else "—"
 
     return (
-        '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px">'
+        '<div style="display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:10px">'
         + _metric_card("Total", str(total), "#6366f1")
         + _metric_card("Pending", str(pending), "#9ca3af")
         + _metric_card("Running", str(running), "#7c3aed")
         + _metric_card("Success", str(success), "#16a34a")
         + _metric_card("Failed", str(failed), "#dc2626")
         + _metric_card("Interrupted", str(interrupted), "#d97706")
+        + _metric_card("Cancelled", str(cancelled), "#be185d")
         + _metric_card("Success rate", rate, "#f59e0b")
         + _metric_card("Avg duration", avg, "#8b5cf6")
         + "</div>"
@@ -122,15 +128,20 @@ def _render_task_rows(tasks: list) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_sse_state(tasks: list, include_args: bool = False) -> str:
+def _build_sse_state(
+    tasks: list,
+    include_args: bool = False,
+    schedules: list | None = None,
+) -> str:
     """
     Serialize the full task store as a single SSE ``state`` event.
 
     Payload shape::
 
         {
-          "tasks":   [ <TaskRecord.to_dict()>, … ],
-          "metrics": { "total": N, "pending": N, … }
+          "tasks":     [ <TaskRecord.to_dict()>, ... ],
+          "metrics":   { "total": N, "pending": N, ... },
+          "schedules": [ <schedule entry dict>, ... ]
         }
 
     When *include_args* is ``True`` each task dict also carries ``args`` and
@@ -143,6 +154,7 @@ def _build_sse_state(tasks: list, include_args: bool = False) -> str:
     running = sum(1 for t in tasks if t.status.value == "running")
     pending = sum(1 for t in tasks if t.status.value == "pending")
     interrupted = sum(1 for t in tasks if t.status.value == "interrupted")
+    cancelled = sum(1 for t in tasks if t.status.value == "cancelled")
     durs = [t.duration for t in tasks if t.duration is not None]
 
     metrics = {
@@ -152,20 +164,64 @@ def _build_sse_state(tasks: list, include_args: bool = False) -> str:
         "success": success,
         "failed": failed,
         "interrupted": interrupted,
+        "cancelled": cancelled,
         "success_rate": round(success / total * 100, 1) if total else None,
         "avg_duration_ms": round(sum(durs) / len(durs) * 1000) if durs else None,
     }
 
-    task_dicts = []
-    for t in tasks:
-        d = t.to_dict()
-        if include_args:
-            d["args"] = [repr(a) for a in t.args]
-            d["kwargs"] = {k: repr(v) for k, v in t.kwargs.items()}
-        task_dicts.append(d)
+    if include_args:
+        task_dicts = [
+            {
+                **t.to_dict(),
+                "args": [repr(a) for a in t.args],
+                "kwargs": {k: repr(v) for k, v in t.kwargs.items()},
+            }
+            for t in tasks
+        ]
+    else:
+        task_dicts = [t.to_dict() for t in tasks]
 
-    payload = json.dumps({"tasks": task_dicts, "metrics": metrics})
+    payload = json.dumps(
+        {"tasks": task_dicts, "metrics": metrics, "schedules": schedules or []}
+    )
     return f"event: state\ndata: {payload}\n\n"
+
+
+def _get_schedule_entries(task_manager: "TaskManager") -> list[dict]:
+    """Serialise the registered schedule entries for the dashboard.
+
+    Returns a list of dicts with ``func_name``, ``trigger``, ``next_run``,
+    and ``last_status`` (the status of the most recent task record for this
+    function, or ``None`` if no run has been recorded yet).
+    """
+    ps = task_manager._periodic_scheduler
+    if ps is None:
+        return []
+
+    # Build a map of func_name -> most recent task record for fast lookup.
+    all_tasks = task_manager.store.list()
+    latest: dict[str, "TaskRecord"] = {}
+    for t in all_tasks:
+        if t.source != "scheduled":
+            continue
+        existing = latest.get(t.func_name)
+        if existing is None or t.created_at > existing.created_at:
+            latest[t.func_name] = t
+
+    return [
+        {
+            "func_name": entry.func.__name__,
+            "trigger": f"every {entry.every}s"
+            if entry.every is not None
+            else entry.cron,
+            "next_run": entry.next_run.isoformat(),
+            "last_status": last.status.value
+            if (last := latest.get(entry.func.__name__)) is not None
+            else None,
+            "last_task_id": last.task_id if last is not None else None,
+        }
+        for entry in ps.entries
+    ]
 
 
 async def _sse_generator(
@@ -192,7 +248,11 @@ async def _sse_generator(
     has_backend = task_manager._scheduler is not None
     try:
         tasks = await task_manager.merged_list()
-        yield _build_sse_state(tasks, include_args=include_args)
+        yield _build_sse_state(
+            tasks,
+            include_args=include_args,
+            schedules=_get_schedule_entries(task_manager),
+        )
 
         while True:
             if await request.is_disconnected():
@@ -201,7 +261,11 @@ async def _sse_generator(
                 await asyncio.wait_for(q.get(), timeout=poll_interval)
                 # Local mutation — always emit a fresh state.
                 tasks = await task_manager.merged_list()
-                yield _build_sse_state(tasks, include_args=include_args)
+                yield _build_sse_state(
+                    tasks,
+                    include_args=include_args,
+                    schedules=_get_schedule_entries(task_manager),
+                )
             except asyncio.TimeoutError:
                 if not has_backend:
                     # Single instance, no backend — keep the connection alive
@@ -211,7 +275,11 @@ async def _sse_generator(
                     # Backend present — refresh to pick up other instances'
                     # completed tasks that flushed since the last local event.
                     tasks = await task_manager.merged_list()
-                    yield _build_sse_state(tasks, include_args=include_args)
+                    yield _build_sse_state(
+                        tasks,
+                        include_args=include_args,
+                        schedules=_get_schedule_entries(task_manager),
+                    )
     except asyncio.CancelledError:
         pass
     finally:
@@ -293,36 +361,30 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
     .status-label--live  { color: #16a34a; }
     .status-label--error { color: #dc2626; }
 
-    /* ── Top row (metrics + filters) ───────────────────────── */
-    .top-row {
-      display: flex;
-      gap: 16px;
-      align-items: stretch;
-      margin-bottom: 16px;
-    }
+    /* ── Top row (metrics + filters) ────────────────────────── */
+    .top-row { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 8px; }
+    .search-row { display: flex; gap: 16px; align-items: center; margin-bottom: 16px; }
+    .search-row .search { flex: 1; height: 34px; }
+    .search-row .filter-trigger-btn { width: 280px; flex-shrink: 0; height: 34px; font-size: 12px; justify-content: center; }
     .metrics {
       flex: 1;
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-      gap: 10px;
-      align-content: start;
+      grid-template-columns: repeat(9, minmax(0, 1fr));
+      gap: 8px;
     }
     .filters-right {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      width: 252px;
+      width: 280px;
       flex-shrink: 0;
-      justify-content: center;
-    }
-    .filter-row {
-      display: flex;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
       gap: 8px;
+      align-content: center;
     }
-    .filter-row .sel { flex: 1; min-width: 0; }
+    .filters-right .sel,
+    .filters-right .filter-trigger-btn { width: 100%; justify-content: center; height: 34px; font-size: 12px; }
+    .filters-right .sel { -webkit-appearance: none; appearance: none; padding: 0 28px 0 10px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 8px center; }
+    .filters-right .filter-trigger-btn { gap: 5px; }
 
-    /* ── Task count row ─────────────────────────────────────── */
-    .task-count { font-size: 12px; color: var(--db-text-faint); margin-bottom: 8px; display: block; }
 
     /* ── Inputs ─────────────────────────────────────────────── */
     .sel, .search {
@@ -341,13 +403,13 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
     .metric-card {
       border: 1px solid transparent;
       border-radius: 10px;
-      padding: 14px 16px;
+      padding: 10px 12px;
     }
     .metric-label {
       font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
       font-weight: 500; margin-bottom: 6px; opacity: .75;
     }
-    .metric-value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.5px; }
+    .metric-value { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.5px; }
 
     .mc-total   { background: #f5f3ff; border-color: #e9d5ff; }
     .mc-total   .metric-label { color: #6d28d9; }
@@ -464,10 +526,15 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
     .retry-btn--warn { border-color: #f59e0b; color: #b45309; }
     .retry-btn--warn:hover { background: #fffbeb; border-color: #d97706; color: #92400e; }
     .panel-body { flex: 1; overflow-y: auto; padding: 20px; overscroll-behavior: contain; }
+    .panel-resize { position: absolute; top: 0; left: 0; width: 5px; height: 100%; cursor: col-resize; z-index: 1; }
+    .panel-resize::after { content: ''; position: absolute; top: 50%; left: 1px; transform: translateY(-50%); width: 3px; height: 32px; border-radius: 2px; background: var(--db-border); transition: background .15s; }
+    .panel-resize:hover::after, .panel-resize--active::after { background: #009688; }
 
     /* Copy button */
     .copy-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; flex-shrink: 0; border: 1px solid var(--db-border); border-radius: 5px; background: var(--db-surface); cursor: pointer; color: var(--db-text-faint); transition: background .1s, border-color .1s, color .1s; }
     .copy-btn:hover { background: var(--db-surface-3); border-color: var(--db-text-faint); color: var(--db-text); }
+    .copy-btn--row { width: 18px; height: 18px; border-radius: 3px; opacity: 0; margin-left: 5px; vertical-align: middle; flex-shrink: 0; }
+    .row:hover .copy-btn--row { opacity: 1; }
 
     /* Toast */
     .toast { position: fixed; bottom: 24px; right: 24px; z-index: 400; background: var(--db-text); color: var(--db-bg); font-size: 13px; font-weight: 500; padding: 10px 16px; border-radius: 8px; display: flex; align-items: center; gap: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.2); opacity: 0; transform: translateY(6px); transition: opacity .2s, transform .2s; pointer-events: none; }
@@ -536,6 +603,43 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
     .pause-btn--paused { border-color: #f59e0b; color: #b45309; background: #fffbeb; }
     [data-theme="dark"] .pause-btn--paused { background: rgba(180,83,9,.15); color: #fbbf24; border-color: rgba(217,119,6,.4); }
     .new-badge { display: inline-block; background: #f59e0b; color: #fff; font-size: 10px; font-weight: 700; border-radius: 10px; padding: 1px 6px; margin-left: 2px; }
+    .source-badge { display: inline-block; background: rgba(0,150,136,.12); color: #009688; font-size: 10px; font-weight: 700; border-radius: 10px; padding: 1px 6px; margin-left: 4px; letter-spacing: .02em; }
+    [data-theme="dark"] .source-badge { background: rgba(0,150,136,.2); color: #4db6ac; }
+
+    /* ── Filter / Clear history trigger buttons ─────────────── */
+    .filter-trigger-btn { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; font-size: 12px; font-weight: 500; border-radius: 5px; border: 1px solid var(--db-border); background: var(--db-surface); color: var(--db-text-2); cursor: pointer; transition: background .1s, border-color .1s; white-space: nowrap; }
+    .filter-trigger-btn:hover { background: var(--db-surface-3); }
+    .filter-trigger-btn--active { border-color: #009688; color: #009688; background: rgba(0,150,136,.07); }
+    [data-theme="dark"] .filter-trigger-btn--active { background: rgba(0,150,136,.15); }
+    .filter-trigger-btn--danger { color: #dc2626; }
+    .filter-trigger-btn--danger:hover { background: #fef2f2; border-color: #fca5a5; }
+    [data-theme="dark"] .filter-trigger-btn--danger { color: #f87171; }
+    [data-theme="dark"] .filter-trigger-btn--danger:hover { background: rgba(220,38,38,.12); border-color: rgba(248,113,113,.3); }
+
+    /* ── Popup modals ────────────────────────────────────────── */
+    .popup-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 200; align-items: center; justify-content: center; }
+    .popup-backdrop--open { display: flex; }
+    .popup { background: var(--db-surface); border: 1px solid var(--db-border); border-radius: 12px; padding: 24px; width: 340px; max-width: 95vw; box-shadow: 0 20px 60px rgba(0,0,0,.18); }
+    [data-theme="dark"] .popup { box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+    .popup-title { font-size: 15px; font-weight: 700; color: var(--db-text); margin: 0 0 4px; letter-spacing: -.01em; }
+    .popup-desc { font-size: 12px; color: var(--db-text-2); margin: 0 0 18px; line-height: 1.5; }
+    .popup-field { margin-bottom: 14px; }
+    .popup-label { display: block; font-size: 11px; font-weight: 600; color: var(--db-text-2); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; }
+    .popup-row { display: flex; gap: 8px; }
+    .popup-input { flex: 1; padding: 8px 10px; font-size: 13px; border: 1px solid var(--db-border); border-radius: 7px; background: var(--db-bg); color: var(--db-text); outline: none; transition: border-color .15s; font-family: inherit; }
+    .popup-input:focus { border-color: #009688; }
+    .popup-select { padding: 8px 10px; font-size: 13px; border: 1px solid var(--db-border); border-radius: 7px; background: var(--db-bg); color: var(--db-text); outline: none; cursor: pointer; font-family: inherit; }
+    .popup-select:focus { border-color: #009688; }
+    .popup-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+    .popup-btn { padding: 7px 16px; font-size: 12px; font-weight: 600; border-radius: 7px; cursor: pointer; border: 1px solid transparent; transition: background .1s, opacity .1s; font-family: inherit; }
+    .popup-btn--primary { background: #009688; color: #fff; border-color: #009688; }
+    .popup-btn--primary:hover { background: #00796b; border-color: #00796b; }
+    .popup-btn--danger { background: #dc2626; color: #fff; border-color: #dc2626; }
+    .popup-btn--danger:hover { background: #b91c1c; border-color: #b91c1c; }
+    .popup-btn--cancel { background: transparent; color: var(--db-text-2); border-color: var(--db-border); }
+    .popup-btn--cancel:hover { background: var(--db-surface-3); }
+    .popup-warning { font-size: 12px; color: #dc2626; background: #fef2f2; border: 1px solid #fca5a5; border-radius: 7px; padding: 8px 10px; margin-top: 12px; line-height: 1.5; }
+    [data-theme="dark"] .popup-warning { background: rgba(220,38,38,.1); border-color: rgba(248,113,113,.3); color: #f87171; }
 
     /* ── Bulk retry toolbar ─────────────────────────────────── */
     .bulk-bar { display: none; align-items: center; gap: 10px; padding: 8px 12px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 7px; margin-bottom: 10px; font-size: 13px; color: #1e40af; }
@@ -551,6 +655,48 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
     .th--check, .td--check { width: 36px; padding: 0 0 0 12px; }
     .td--check { vertical-align: middle; }
     input.row-check { cursor: pointer; accent-color: #3b82f6; width: 14px; height: 14px; }
+
+    /* ── Tab bar (segmented control) ────────────────────────── */
+    .tab-bar { display: inline-flex; gap: 2px; margin-bottom: 16px; background: var(--db-surface-3); border: 1px solid var(--db-border); border-radius: 9px; padding: 3px; }
+    .tab-btn { background: none; border: none; border-radius: 7px; padding: 5px 14px; font-size: 12.5px; font-weight: 500; color: var(--db-text-muted); cursor: pointer; transition: color .15s, background .15s, box-shadow .15s; white-space: nowrap; }
+    .tab-btn:hover { color: var(--db-text-2); background: rgba(0,0,0,.04); }
+    [data-theme="dark"] .tab-btn:hover { background: rgba(255,255,255,.05); }
+    .tab-btn--active { background: var(--db-surface); color: var(--db-text); box-shadow: 0 1px 3px rgba(0,0,0,.10), 0 0 0 1px rgba(0,0,0,.06); }
+    [data-theme="dark"] .tab-btn--active { box-shadow: 0 1px 3px rgba(0,0,0,.4), 0 0 0 1px rgba(255,255,255,.06); }
+    .tab-count { display: inline-block; background: rgba(0,150,136,.12); color: #009688; font-size: 10px; font-weight: 700; border-radius: 10px; padding: 1px 6px; margin-left: 4px; }
+    [data-theme="dark"] .tab-count { background: rgba(0,150,136,.2); color: #4db6ac; }
+    .tab-btn--active .tab-count { background: rgba(0,150,136,.15); }
+
+
+    /* ── Cancelled badge ────────────────────────────────────── */
+    .badge--cancelled { background: #fce7f3; color: #be185d; }
+    [data-theme="dark"] .badge--cancelled { background: rgba(190,24,93,.2); color: #f472b6; }
+
+    /* ── Cancelled metric card ──────────────────────────────── */
+    .mc-cancelled { background: #fce7f3; border-color: #f9a8d4; }
+    .mc-cancelled .metric-label { color: #9d174d; }
+    .mc-cancelled .metric-value { color: #831843; }
+    [data-theme="dark"] .mc-cancelled { background: rgba(190,24,93,.1); border-color: rgba(244,114,182,.25); }
+    [data-theme="dark"] .mc-cancelled .metric-label { color: #f472b6; }
+    [data-theme="dark"] .mc-cancelled .metric-value { color: #fbcfe8; }
+
+    /* ── Cancel button ──────────────────────────────────────── */
+    .cancel-btn { display: inline-flex; align-items: center; gap: 5px; padding: 5px 12px; font-size: 12px; font-weight: 500; border-radius: 5px; border: 1px solid #fca5a5; background: var(--db-surface); color: #dc2626; cursor: pointer; transition: background .1s, border-color .1s; }
+    .cancel-btn:hover { background: #fef2f2; border-color: #ef4444; }
+    .cancel-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+    /* ── Audit table ────────────────────────────────────────── */
+    .audit-empty { text-align: center; padding: 40px; color: var(--db-text-faint); font-size: 13px; }
+
+    /* ── Registered tasks grid ───────────────────────────────── */
+    .rtask-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+    .rtask-card { background: var(--db-surface); border: 1px solid var(--db-border); border-radius: 8px; padding: 12px 14px; transition: border-color .15s, box-shadow .15s; }
+    .rtask-card:hover { border-color: #009688; box-shadow: 0 2px 8px rgba(0,150,136,.08); }
+    .rtask-name { font-family: 'Geist Mono', monospace; font-size: 12.5px; font-weight: 600; color: var(--db-text); margin-bottom: 10px; word-break: break-all; line-height: 1.4; }
+    .rtask-pills { display: flex; flex-wrap: wrap; gap: 4px; }
+    .rtask-pill { font-size: 10.5px; font-weight: 500; padding: 2px 7px; border-radius: 4px; background: var(--db-surface-3); color: var(--db-text-3); border: 1px solid var(--db-border-2); white-space: nowrap; }
+    .rtask-pill--accent { background: rgba(0,150,136,.08); color: #009688; border-color: rgba(0,150,136,.2); }
+    [data-theme="dark"] .rtask-pill--accent { background: rgba(0,150,136,.15); color: #4db6ac; }
 
   </style>
 </head>
@@ -581,6 +727,7 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
 
   <!-- Top row: metrics left, filters right -->
   <div class="top-row">
+    <!-- Metrics -->
     <div class="metrics">
       <div class="metric-card mc-total">  <div class="metric-label">Total</div>        <div class="metric-value" id="metric-total">&#8212;</div></div>
       <div class="metric-card mc-pending"><div class="metric-label">Pending</div>       <div class="metric-value" id="metric-pending">&#8212;</div></div>
@@ -588,36 +735,55 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
       <div class="metric-card mc-success"><div class="metric-label">Success</div>       <div class="metric-value" id="metric-success">&#8212;</div></div>
       <div class="metric-card mc-failed"> <div class="metric-label">Failed</div>        <div class="metric-value" id="metric-failed">&#8212;</div></div>
       <div class="metric-card mc-interrupted"><div class="metric-label">Interrupted</div>  <div class="metric-value" id="metric-interrupted">&#8212;</div></div>
+      <div class="metric-card mc-cancelled"><div class="metric-label">Cancelled</div>    <div class="metric-value" id="metric-cancelled">&#8212;</div></div>
       <div class="metric-card mc-rate">   <div class="metric-label">Success Rate</div> <div class="metric-value" id="metric-rate">&#8212;</div></div>
       <div class="metric-card mc-avg">    <div class="metric-label">Avg Duration</div> <div class="metric-value" id="metric-avg">&#8212;</div></div>
     </div>
+    <!-- Filters -->
     <div class="filters-right">
-      <input type="text" class="search" id="search-input" placeholder="Search by ID or function&#8230;" autocomplete="off" spellcheck="false">
-      <div class="filter-row">
-        <select class="sel" id="time-filter">
-          <option value="all">All time</option>
-          <option value="1h">Last 1h</option>
-          <option value="6h">Last 6h</option>
-          <option value="24h">Last 24h</option>
-          <option value="7d">Last 7d</option>
-        </select>
-        <select class="sel" id="status-filter">
-          <option value="all">All statuses</option>
-          <option value="pending">Pending</option>
-          <option value="running">Running</option>
-          <option value="success">Success</option>
-          <option value="failed">Failed</option>
-          <option value="interrupted">Interrupted</option>
-        </select>
-        <select class="sel" id="func-filter">
-          <option value="all">All functions</option>
-        </select>
-      </div>
+      <select class="sel" id="status-filter">
+        <option value="all">All statuses</option>
+        <option value="pending">Pending</option>
+        <option value="running">Running</option>
+        <option value="success">Success</option>
+        <option value="failed">Failed</option>
+        <option value="interrupted">Interrupted</option>
+        <option value="cancelled">Cancelled</option>
+      </select>
+      <select class="sel" id="func-filter">
+        <option value="all">All functions</option>
+      </select>
+      <button class="filter-trigger-btn" id="time-filter-btn" onclick="openTimeFilterPopup()">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <span id="time-filter-label">All time</span>
+      </button>
+      <button class="filter-trigger-btn" onclick="exportCsv()" title="Export current view as CSV">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Export CSV
+      </button>
     </div>
   </div>
 
-  <!-- Task count + table -->
-  <span class="task-count" id="task-count"></span>
+  <!-- Search + clear history row -->
+  <div class="search-row">
+    <input type="search" class="search" id="search-input" placeholder="Search by ID or function&#8230;" autocomplete="off">
+    <button class="filter-trigger-btn filter-trigger-btn--danger" onclick="openClearHistoryPopup()">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+      Clear history
+    </button>
+  </div>
+
+  <!-- Tab bar -->
+  <div class="tab-bar">
+    <button class="tab-btn tab-btn--active" id="tab-view" onclick="showTab('view')">View<span class="tab-count" id="tab-view-count"></span></button>
+    <button class="tab-btn" id="tab-deadletters" onclick="showTab('deadletters')">Dead Letters<span class="tab-count" id="tab-deadletters-count" style="background:rgba(220,38,38,.12);color:#dc2626"></span></button>
+    <button class="tab-btn" id="tab-audit" onclick="showTab('audit')" style="display:none">Audit<span class="tab-count" id="tab-audit-count"></span></button>
+    <button class="tab-btn" id="tab-schedules" onclick="showTab('schedules')">Schedules<span class="tab-count" id="tab-schedules-count"></span></button>
+    <button class="tab-btn" id="tab-tasks" onclick="showTab('tasks')">Tasks<span class="tab-count" id="tab-tasks-count"></span></button>
+  </div>
+
+  <!-- View panel (task run history) -->
+  <div id="panel-view">
 
   <!-- Bulk retry toolbar -->
   <div class="bulk-bar" id="bulk-bar">
@@ -648,12 +814,118 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
   </div>
   <div id="pagination"></div>
 
+  </div>
+
+  <!-- Dead Letters panel -->
+  <div id="panel-deadletters" style="display:none">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="th">ID</th>
+            <th class="th">Function</th>
+            <th class="th">Status</th>
+            <th class="th th--r">Duration</th>
+            <th class="th">Created</th>
+            <th class="th">Error</th>
+          </tr>
+        </thead>
+        <tbody id="deadletters-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+
+  <!-- Audit panel -->
+  <div id="panel-audit" style="display:none">
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th class="th">Time</th>
+          <th class="th">Action</th>
+          <th class="th">Task ID</th>
+          <th class="th">Actor</th>
+          <th class="th">Detail</th>
+        </tr></thead>
+        <tbody id="audit-tbody"><tr><td colspan="5" class="audit-empty">Loading&#8230;</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Schedules panel -->
+  <div id="panel-schedules" style="display:none">
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th class="th">Function</th>
+          <th class="th">Trigger</th>
+          <th class="th">Next Run</th>
+          <th class="th">Last Status</th>
+        </tr></thead>
+        <tbody id="schedules-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Tasks panel (registered functions) -->
+  <div id="panel-tasks" style="display:none">
+    <div id="registered-tasks-list"></div>
+  </div>
+
 </main>
 
 <div class="toast" id="toast"></div>
 <div class="backdrop" id="detail-backdrop"></div>
 
+<!-- Time filter popup -->
+<div class="popup-backdrop" id="time-filter-popup" onclick="closeTimeFilterPopup(event)">
+  <div class="popup" onclick="event.stopPropagation()">
+    <div class="popup-title">Filter by time</div>
+    <div class="popup-desc">Show tasks created within the last N units. Leave empty to show all.</div>
+    <div class="popup-field">
+      <label class="popup-label">Time window</label>
+      <div class="popup-row">
+        <input type="number" class="popup-input" id="tf-popup-val" placeholder="e.g. 6" min="1" autocomplete="off">
+        <select class="popup-select" id="tf-popup-unit">
+          <option value="min">Minutes</option>
+          <option value="hour" selected>Hours</option>
+          <option value="day">Days</option>
+        </select>
+      </div>
+    </div>
+    <div class="popup-actions">
+      <button class="popup-btn popup-btn--cancel" onclick="clearTimeFilter()">Clear filter</button>
+      <button class="popup-btn popup-btn--primary" onclick="applyTimeFilter()">Apply</button>
+    </div>
+  </div>
+</div>
+
+<!-- Clear history popup -->
+<div class="popup-backdrop" id="clear-history-popup" onclick="closeClearHistoryPopup(event)">
+  <div class="popup" onclick="event.stopPropagation()">
+    <div class="popup-title">Clear task history</div>
+    <div class="popup-desc">Delete completed tasks (success, failed, interrupted) older than the entered period.</div>
+    <div class="popup-field">
+      <label class="popup-label">Delete tasks older than</label>
+      <div class="popup-row">
+        <input type="number" class="popup-input" id="ch-popup-val" placeholder="e.g. 7" min="1" autocomplete="off">
+        <select class="popup-select" id="ch-popup-unit">
+          <option value="min">Minutes</option>
+          <option value="hour">Hours</option>
+          <option value="day" selected>Days</option>
+        </select>
+      </div>
+    </div>
+    <div class="popup-warning">This action cannot be undone. Pending and running tasks are never deleted.</div>
+    <div class="popup-actions">
+      <button class="popup-btn popup-btn--cancel" onclick="closeClearHistoryPopup()">Cancel</button>
+      <button class="popup-btn popup-btn--danger" onclick="confirmClearHistory()">Delete</button>
+    </div>
+  </div>
+</div>
+
 <div class="panel" id="detail-panel">
+  <div class="panel-resize" id="panel-resize-handle"></div>
   <div class="panel-header">
     <div class="panel-header-row">
       <span class="panel-title">Task Detail</span>
@@ -669,19 +941,23 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <script>
-  const STREAM_URL   = '__STREAM_URL__';
-  const SHOW_ARGS    = __SHOW_ARGS__;
-  const TASKS_PREFIX = '__TASKS_PREFIX__';
+  const STREAM_URL        = '__STREAM_URL__';
+  const SHOW_ARGS         = __SHOW_ARGS__;
+  const TASKS_PREFIX      = '__TASKS_PREFIX__';
+  const REGISTERED_TASKS  = __REGISTERED_TASKS__;
+  const SHOW_AUDIT        = __SHOW_AUDIT__;
 
   // ── State ──────────────────────────────────────────────────────
   const PAGE_SIZE = 30;
-  let state = { tasks: [], metrics: {} };
+  let state = { tasks: [], metrics: {}, schedules: [] };
   let sortCol      = localStorage.getItem('tf-sort-col') || 'created_at';
   let sortDir      = localStorage.getItem('tf-sort-dir') || 'desc';
   let statusFilter = localStorage.getItem('tf-status')  || 'all';
   let funcFilter   = localStorage.getItem('tf-func')    || 'all';
-  let timeFilter   = localStorage.getItem('tf-time')    || 'all';
-  let searchText   = '';
+  let searchQuery  = localStorage.getItem('tf-search')  || '';
+  let timeFilterVal  = localStorage.getItem('tf-time-val')  || '';
+  let timeFilterUnit = localStorage.getItem('tf-time-unit') || 'hour';
+
   let selectedId   = null;
   let currentPage  = 0;
   let paused       = localStorage.getItem('tf-paused') === '1';
@@ -720,6 +996,43 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
       const t = state.tasks.find(function(t) { return t.task_id === selectedId; });
       if (t) renderDetail(t); else closeDetail();
     }
+    renderSchedules();
+    renderDeadLetters();
+    var vcnt = document.getElementById('tab-view-count');
+    if (vcnt) vcnt.textContent = state.tasks.length > 0 ? state.tasks.length : '';
+  }
+
+  function showTab(name) {
+    ['view', 'deadletters', 'audit', 'schedules', 'tasks'].forEach(function(t) {
+      document.getElementById('panel-' + t).style.display = name === t ? '' : 'none';
+      var tabEl = document.getElementById('tab-' + t);
+      if (tabEl) tabEl.classList.toggle('tab-btn--active', name === t);
+    });
+    if (name === 'audit') fetchAudit();
+  }
+
+  function renderSchedules() {
+    var tbody = document.getElementById('schedules-tbody');
+    if (!tbody) return;
+    var entries = state.schedules || [];
+    var scnt = document.getElementById('tab-schedules-count');
+    if (scnt) scnt.textContent = entries.length > 0 ? entries.length : '';
+    if (entries.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#9ca3af;padding:40px;font-size:0.9rem">No scheduled tasks registered.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = entries.map(function(e) {
+      var statusHtml = e.last_status
+        ? '<span class="badge badge--' + e.last_status + '">' + esc(e.last_status) + '</span>'
+        : '<span class="muted">\u2014</span>';
+      var nextRun = e.next_run ? fmtDate(e.next_run) : '\u2014';
+      return '<tr>'
+        + '<td class="td td--func">' + esc(e.func_name) + '</td>'
+        + '<td class="td"><code>' + esc(e.trigger) + '</code></td>'
+        + '<td class="td">' + nextRun + '</td>'
+        + '<td class="td">' + statusHtml + '</td>'
+        + '</tr>';
+    }).join('');
   }
 
   function syncPauseBtn() {
@@ -768,12 +1081,13 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
   function renderMetrics() {
     const m = state.metrics;
     const map = {
-      total:   m.total   ?? 0,
-      pending: m.pending ?? 0,
-      running: m.running ?? 0,
-      success: m.success ?? 0,
-      failed:       m.failed       ?? 0,
-      interrupted:  m.interrupted  ?? 0,
+      total:        m.total       ?? 0,
+      pending:      m.pending     ?? 0,
+      running:      m.running     ?? 0,
+      success:      m.success     ?? 0,
+      failed:       m.failed      ?? 0,
+      interrupted:  m.interrupted ?? 0,
+      cancelled:    m.cancelled   ?? 0,
       rate:    m.success_rate    != null ? m.success_rate    + '%'  : '\u2014',
       avg:     m.avg_duration_ms != null ? m.avg_duration_ms + ' ms': '\u2014',
     };
@@ -785,13 +1099,16 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
 
   // ── Filter + Sort ──────────────────────────────────────────────
   function timeFilterCutoff() {
-    if (timeFilter === 'all') return null;
-    var ms = { '1h': 3600000, '6h': 21600000, '24h': 86400000, '7d': 604800000 };
-    return Date.now() - (ms[timeFilter] || 0);
+    var v = parseInt(timeFilterVal, 10);
+    if (!v || v <= 0) return null;
+    var msMap = { min: 60000, hour: 3600000, day: 86400000 };
+    var ms = msMap[timeFilterUnit] || 3600000;
+    return Date.now() - (v * ms);
   }
 
   function filteredSorted() {
     var cutoff = timeFilterCutoff();
+    var q = searchQuery.trim().toLowerCase();
     return state.tasks
       .filter(function(t) {
         if (statusFilter !== 'all' && t.status !== statusFilter) return false;
@@ -800,8 +1117,7 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
           var ts = t.created_at ? new Date(t.created_at).getTime() : 0;
           if (ts < cutoff) return false;
         }
-        if (searchText) {
-          var q = searchText.toLowerCase();
+        if (q) {
           if (!t.task_id.toLowerCase().includes(q) && !t.func_name.toLowerCase().includes(q)) return false;
         }
         return true;
@@ -884,6 +1200,66 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
     });
   }
 
+  // ── Time filter popup ──────────────────────────────────────────
+  function openTimeFilterPopup() {
+    document.getElementById('tf-popup-val').value = timeFilterVal;
+    document.getElementById('tf-popup-unit').value = timeFilterUnit;
+    document.getElementById('time-filter-popup').classList.add('popup-backdrop--open');
+    document.getElementById('tf-popup-val').focus();
+  }
+  function closeTimeFilterPopup(e) {
+    if (!e || e.target === document.getElementById('time-filter-popup')) {
+      document.getElementById('time-filter-popup').classList.remove('popup-backdrop--open');
+    }
+  }
+  function applyTimeFilter() {
+    var val = document.getElementById('tf-popup-val').value;
+    var unit = document.getElementById('tf-popup-unit').value;
+    timeFilterVal = val; timeFilterUnit = unit; currentPage = 0;
+    localStorage.setItem('tf-time-val', val);
+    localStorage.setItem('tf-time-unit', unit);
+    var btn = document.getElementById('time-filter-btn');
+    var label = document.getElementById('time-filter-label');
+    if (val && parseInt(val, 10) > 0) {
+      var unitLabels = { min: 'min', hour: 'hr', day: 'd' };
+      label.textContent = 'Last ' + val + unitLabels[unit];
+      btn.classList.add('filter-trigger-btn--active');
+    } else {
+      label.textContent = 'All time';
+      btn.classList.remove('filter-trigger-btn--active');
+    }
+    document.getElementById('time-filter-popup').classList.remove('popup-backdrop--open');
+    renderTable();
+  }
+  function clearTimeFilter() {
+    document.getElementById('tf-popup-val').value = '';
+    applyTimeFilter();
+  }
+
+  // ── Clear history popup ────────────────────────────────────────
+  function openClearHistoryPopup() {
+    document.getElementById('ch-popup-val').value = '';
+    document.getElementById('clear-history-popup').classList.add('popup-backdrop--open');
+    document.getElementById('ch-popup-val').focus();
+  }
+  function closeClearHistoryPopup(e) {
+    if (!e || e.target === document.getElementById('clear-history-popup')) {
+      document.getElementById('clear-history-popup').classList.remove('popup-backdrop--open');
+    }
+  }
+  function confirmClearHistory() {
+    var val = parseInt(document.getElementById('ch-popup-val').value, 10);
+    var unit = document.getElementById('ch-popup-unit').value;
+    if (!val || val <= 0) { showToast('Enter a number first'); return; }
+    document.getElementById('clear-history-popup').classList.remove('popup-backdrop--open');
+    fetch(TASKS_PREFIX + '/history?value=' + val + '&unit=' + unit, { method: 'DELETE' })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        showToast('Deleted ' + data.deleted + ' task' + (data.deleted !== 1 ? 's' : ''));
+      })
+      .catch(function() { showToast('Failed to clear history'); });
+  }
+
   // ── Table ──────────────────────────────────────────────────────
   function renderTable() {
     var all   = filteredSorted();
@@ -894,11 +1270,6 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
     if (currentPage >= totalPages) currentPage = totalPages - 1;
 
     var tasks = all.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
-
-    var cnt = document.getElementById('task-count');
-    cnt.textContent = total === state.tasks.length
-      ? total + ' task' + (total !== 1 ? 's' : '')
-      : total + ' of ' + state.tasks.length + ' tasks';
 
     var tbody = document.getElementById('tasks-tbody');
     if (!tasks.length) {
@@ -924,8 +1295,10 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
         + '</td>';
       return '<tr class="row' + sel + '" onclick="openDetail(this.dataset.id)" data-id="' + esc(t.task_id) + '">'
         + checkCell
-        + '<td class="td td--mono">'  + esc(t.task_id.slice(0,8)) + '\u2026</td>'
-        + '<td class="td td--func">'  + esc(t.func_name) + '</td>'
+        + '<td class="td td--mono" style="white-space:nowrap">' + esc(t.task_id.slice(0,8)) + '\u2026'
+        + '<button class="copy-btn copy-btn--row" data-val="' + esc(t.task_id) + '" onclick="event.stopPropagation();copyId(this)" title="Copy full ID"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>'
+        + '</td>'
+        + '<td class="td td--func">' + esc(t.func_name) + (t.source === 'scheduled' ? ' <span class="source-badge">scheduled</span>' : '') + '</td>'
         + '<td class="td">'           + badge(t.status) + '</td>'
         + '<td class="td td--r">'     + dur + '</td>'
         + '<td class="td td--r">'     + t.retries_used + '</td>'
@@ -959,7 +1332,7 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
   function goPage(p) { currentPage = p; renderTable(); }
 
   function badge(status) {
-    var cls = { pending:'badge--pending', running:'badge--running', success:'badge--success', failed:'badge--failed', interrupted:'badge--interrupted' };
+    var cls = { pending:'badge--pending', running:'badge--running', success:'badge--success', failed:'badge--failed', interrupted:'badge--interrupted', cancelled:'badge--cancelled' };
     return '<span class="badge ' + (cls[status] || 'badge--pending') + '">' + esc(status) + '</span>';
   }
 
@@ -1031,6 +1404,7 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
     const fAvg  = fDurs.length ? (fDurs.reduce((a,b)=>a+b,0)/fDurs.length).toFixed(0) : null;
     const fMin  = fDurs.length ? Math.min(...fDurs).toFixed(0) : null;
     const fMax  = fDurs.length ? Math.max(...fDurs).toFixed(0) : null;
+    const fP95  = fDurs.length >= 2 ? (function(){ var s=[...fDurs].sort(function(a,b){return a-b;}); return s[Math.floor(s.length*0.95)].toFixed(0); })() : null;
     const fRate = fTotal ? (fSuccess / fTotal * 100).toFixed(1) : null;
     const rateCls = fRate == null ? 'neutral' : fRate >= 80 ? 'success' : fRate >= 50 ? 'warning' : 'danger';
 
@@ -1078,6 +1452,18 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
       + '<div class="d-section"><div class="d-label">Function</div><div class="d-val d-func">' + esc(task.func_name) + '</div></div>'
       + '<div class="d-section"><div class="d-label">Status</div><div>' + badge(task.status) + '</div></div>'
       + '</div>'
+
+      + ((task.status === 'pending' || task.status === 'running') ?
+          '<div class="d-section" style="margin-top:4px">'
+          + '<button class="cancel-btn" id="cancel-btn-' + esc(task.task_id) + '" data-task-id="' + esc(task.task_id) + '" onclick="cancelTask(this.dataset.taskId, this)">'
+          + '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>'
+          + 'Cancel task'
+          + '</button>'
+          + (task.status === 'running' ?
+              '<div style="font-size:11px;color:var(--db-text-muted);margin-top:5px">Async tasks are cancelled immediately. Sync tasks stop waiting but the underlying thread runs to completion.</div>'
+            : '')
+          + '</div>'
+        : '')
 
       + ((task.status === 'failed' || task.status === 'interrupted') ?
           '<div class="d-section" style="margin-top:4px">'
@@ -1144,6 +1530,7 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
       + aCard('Avg Duration',  fAvg   != null ? fAvg   + ' ms': '\u2014', 'neutral')
       + aCard('Min Duration',  fMin   != null ? fMin   + ' ms': '\u2014', 'neutral')
       + aCard('Max Duration',  fMax   != null ? fMax   + ' ms': '\u2014', 'neutral')
+      + aCard('P95 Duration',  fP95   != null ? fP95   + ' ms': '\u2014', 'neutral')
       + '</div>'
 
       + '<div class="divider"></div>'
@@ -1230,6 +1617,41 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
     });
   }
 
+  // ── CSV Export ────────────────────────────────────────────────
+  function exportCsv() {
+    var tasks = filteredSorted();
+    var headers = ['ID', 'Function', 'Status', 'Duration (ms)', 'Retries', 'Created', 'Error'];
+    function csvCell(v) {
+      var s = String(v ?? '');
+      if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    }
+    var rows = [headers].concat(tasks.map(function(t) {
+      return [
+        t.task_id,
+        t.func_name,
+        t.status,
+        t.duration != null ? (t.duration * 1000).toFixed(0) : '',
+        t.retries_used,
+        t.created_at || '',
+        t.error ? t.error.replace(/[\r\n]+/g, ' ') : '',
+      ].map(csvCell);
+    }));
+    var csv = rows.map(function(r) { return r.join(','); }).join('\r\n');
+    var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'tasks-' + new Date().toISOString().slice(0, 10) + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('Exporting ' + tasks.length + ' task' + (tasks.length !== 1 ? 's' : ''));
+  }
+
   // ── Utilities ──────────────────────────────────────────────────
   function esc(s) {
     return String(s ?? '')
@@ -1244,9 +1666,18 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
   }
 
   // ── Event listeners ────────────────────────────────────────────
-  document.getElementById('time-filter').addEventListener('change', function(e) {
-    timeFilter = e.target.value; currentPage = 0;
-    localStorage.setItem('tf-time', timeFilter); renderTable();
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+      closeTimeFilterPopup();
+      closeClearHistoryPopup();
+    }
+  });
+  document.getElementById('tf-popup-val').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') applyTimeFilter();
+  });
+  document.getElementById('search-input').addEventListener('input', function(e) {
+    searchQuery = e.target.value; currentPage = 0;
+    localStorage.setItem('tf-search', searchQuery); renderTable();
   });
   document.getElementById('status-filter').addEventListener('change', function(e) {
     statusFilter = e.target.value; currentPage = 0;
@@ -1256,18 +1687,28 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
     funcFilter = e.target.value; currentPage = 0;
     localStorage.setItem('tf-func', funcFilter); renderTable();
   });
-  document.getElementById('search-input').addEventListener('input', function(e) {
-    searchText = e.target.value; currentPage = 0; renderTable();
-  });
   document.getElementById('detail-close').addEventListener('click', closeDetail);
   document.getElementById('detail-backdrop').addEventListener('click', closeDetail);
 
   // ── Restore persisted filter UI state ──────────────────────────
   (function() {
-    var tf = document.getElementById('time-filter');
+    var si = document.getElementById('search-input');
+    if (si) si.value = searchQuery;
     var sf = document.getElementById('status-filter');
-    if (tf) tf.value = timeFilter;
     if (sf) sf.value = statusFilter;
+    // Restore time filter button label
+    if (timeFilterVal && parseInt(timeFilterVal, 10) > 0) {
+      var unitLabels = { min: 'min', hour: 'hr', day: 'd' };
+      var btn = document.getElementById('time-filter-btn');
+      var label = document.getElementById('time-filter-label');
+      if (label) label.textContent = 'Last ' + timeFilterVal + unitLabels[timeFilterUnit];
+      if (btn) btn.classList.add('filter-trigger-btn--active');
+    }
+    // Show audit tab only when auth is enabled
+    if (SHOW_AUDIT) {
+      var auditTab = document.getElementById('tab-audit');
+      if (auditTab) auditTab.style.display = '';
+    }
     // Sort indicators
     document.querySelectorAll('[data-sort]').forEach(function(th) {
       var c = th.dataset.sort;
@@ -1318,12 +1759,199 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
       });
   }
 
+  // ── Registered Tasks tab ──────────────────────────────────────
+  function renderRegisteredTasks() {
+    var container = document.getElementById('registered-tasks-list');
+    if (!container) return;
+    var tcnt = document.getElementById('tab-tasks-count');
+    if (!REGISTERED_TASKS || REGISTERED_TASKS.length === 0) {
+      container.innerHTML = '<div class="empty">No tasks registered.</div>';
+      return;
+    }
+    if (tcnt) tcnt.textContent = REGISTERED_TASKS.length;
+    var cards = REGISTERED_TASKS.map(function(t) {
+      var pills = [];
+      pills.push(rtaskPill(t.retries + (t.retries === 1 ? ' retry' : ' retries'), t.retries > 0));
+      if (t.delay > 0) pills.push(rtaskPill(t.delay + 's delay', false));
+      if (t.backoff !== 1.0 && t.delay > 0) pills.push(rtaskPill(t.backoff + 'x backoff', false));
+      if (t.persist) pills.push(rtaskPill('persist', true));
+      if (t.requeue_on_interrupt) pills.push(rtaskPill('requeue', true));
+      return '<div class="rtask-card">'
+        + '<div class="rtask-name">' + esc(t.name) + '</div>'
+        + '<div class="rtask-pills">' + pills.join('') + '</div>'
+        + '</div>';
+    });
+    container.innerHTML = '<div class="rtask-grid">' + cards.join('') + '</div>';
+  }
+
+  function rtaskPill(text, accent) {
+    return '<span class="rtask-pill' + (accent ? ' rtask-pill--accent' : '') + '">' + esc(text) + '</span>';
+  }
+
+
+  // ── Dead Letters ───────────────────────────────────────────────
+  function renderDeadLetters() {
+    var tbody = document.getElementById('deadletters-tbody');
+    var cnt   = document.getElementById('tab-deadletters-count');
+    if (!tbody) return;
+    var failed = state.tasks.filter(function(t) { return t.status === 'failed'; });
+    failed.sort(function(a, b) { return (b.created_at || '').localeCompare(a.created_at || ''); });
+    if (cnt) cnt.textContent = failed.length > 0 ? failed.length : '';
+    if (!failed.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">No failed tasks.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = failed.map(function(t) {
+      var dur  = t.duration != null ? (t.duration * 1000).toFixed(0) + ' ms' : '\u2014';
+      var date = t.created_at ? fmtDate(t.created_at) : '\u2014';
+      var err  = t.error
+        ? '<span class="err-text" title="' + esc(t.error) + '">' + esc(t.error.slice(0,60)) + (t.error.length > 60 ? '\u2026' : '') + '</span>'
+        : '<span class="muted">\u2014</span>';
+      return '<tr class="row" onclick="openDetail(this.dataset.id)" data-id="' + esc(t.task_id) + '">'
+        + '<td class="td td--mono">' + esc(t.task_id.slice(0,8)) + '\u2026</td>'
+        + '<td class="td td--func">' + esc(t.func_name) + '</td>'
+        + '<td class="td">'           + badge(t.status) + '</td>'
+        + '<td class="td td--r">'     + dur + '</td>'
+        + '<td class="td td--date">'  + date + '</td>'
+        + '<td class="td td--err">'   + err + '</td>'
+        + '</tr>';
+    }).join('');
+  }
+
+  // ── Audit log ─────────────────────────────────────────────────
+  function fetchAudit() {
+    var tbody = document.getElementById('audit-tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="5" class="audit-empty">Loading\u2026</td></tr>';
+    fetch(TASKS_PREFIX + '/audit')
+      .then(function(r) { return r.json(); })
+      .then(function(entries) {
+        var cnt = document.getElementById('tab-audit-count');
+        if (cnt) cnt.textContent = entries.length > 0 ? entries.length : '';
+        if (!entries.length) {
+          tbody.innerHTML = '<tr><td colspan="5" class="audit-empty">No audit entries yet.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = entries.map(function(e) {
+          var detail = e.detail && Object.keys(e.detail).length
+            ? Object.entries(e.detail).map(function(kv){ return kv[0] + ': ' + String(kv[1]).slice(0,8) + '\u2026'; }).join(', ')
+            : '\u2014';
+          var actionCls = e.action === 'cancel' ? 'color:#dc2626' : 'color:#7c3aed';
+          return '<tr>'
+            + '<td class="td" style="white-space:nowrap;font-size:12px">' + esc(fmtDate(e.timestamp)) + '</td>'
+            + '<td class="td"><span style="font-weight:600;' + actionCls + '">' + esc(e.action) + '</span></td>'
+            + '<td class="td td--mono" style="cursor:pointer" onclick="openDetail(\'' + esc(e.task_id) + '\')">' + esc(e.task_id.slice(0,8)) + '\u2026</td>'
+            + '<td class="td">' + esc(e.actor) + '</td>'
+            + '<td class="td" style="font-size:12px;color:var(--db-text-muted)">' + esc(detail) + '</td>'
+            + '</tr>';
+        }).join('');
+      })
+      .catch(function() {
+        tbody.innerHTML = '<tr><td colspan="5" class="audit-empty">Failed to load audit log.</td></tr>';
+      });
+  }
+
+  // ── Cancel task ────────────────────────────────────────────────
+  function cancelTask(taskId, btn) {
+    btn.disabled = true;
+    btn.textContent = 'Cancelling\u2026';
+    fetch(TASKS_PREFIX + '/' + taskId + '/cancel', { method: 'POST' })
+      .then(function(res) {
+        if (!res.ok) return res.json().then(function(b) { throw new Error(b.detail || 'Cancel failed'); });
+        return res.json();
+      })
+      .then(function() {
+        btn.textContent = 'Cancelled';
+        btn.style.borderColor = '#be185d';
+        btn.style.color = '#be185d';
+        showToast('Task cancelled');
+      })
+      .catch(function(err) {
+        btn.disabled = false;
+        btn.textContent = 'Cancel task';
+        showToast('Could not cancel: ' + err.message);
+      });
+  }
+
+
+  // ── Panel resize ───────────────────────────────────────────────
+  (function() {
+    var panel  = document.getElementById('detail-panel');
+    var handle = document.getElementById('panel-resize-handle');
+    if (!panel || !handle) return;
+
+    var MIN_W = 320;
+    function maxW() { return Math.min(900, Math.round(window.innerWidth * 0.82)); }
+
+    // Restore persisted width
+    var saved = parseInt(localStorage.getItem('tf-panel-width'), 10);
+    if (saved && saved >= MIN_W && saved <= maxW()) {
+      panel.style.width = saved + 'px';
+    }
+
+    handle.addEventListener('mousedown', function(e) {
+      e.preventDefault();
+      handle.classList.add('panel-resize--active');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      // Disable the open/close transition while dragging so movement is instant
+      panel.style.transition = 'none';
+
+      function onMove(e) {
+        var w = Math.max(MIN_W, Math.min(maxW(), window.innerWidth - e.clientX));
+        panel.style.width = w + 'px';
+      }
+
+      function onUp() {
+        handle.classList.remove('panel-resize--active');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        panel.style.transition = '';
+        var w = parseInt(panel.style.width, 10);
+        if (w >= MIN_W) localStorage.setItem('tf-panel-width', w);
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      }
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+
+    // Double-click the handle to reset to the default width
+    handle.addEventListener('dblclick', function() {
+      panel.style.width = '440px';
+      localStorage.removeItem('tf-panel-width');
+    });
+  })();
+
   connect();
   syncPauseBtn();
+  renderRegisteredTasks();
   updateThemeBtn(document.documentElement.getAttribute('data-theme') || 'light');
 </script>
 </body>
 </html>"""
+
+
+def _serialize_registry(registry) -> str:
+    """Serialize registered task functions and their configs as a JSON array."""
+    result = []
+    for name, func in registry._by_name.items():
+        config = registry._by_id.get(id(func))
+        if config is None:
+            continue
+        result.append(
+            {
+                "name": name,
+                "retries": config.retries,
+                "delay": config.delay,
+                "backoff": config.backoff,
+                "persist": config.persist,
+                "requeue_on_interrupt": config.requeue_on_interrupt,
+            }
+        )
+    result.sort(key=lambda x: x["name"])
+    return json.dumps(result)
 
 
 def _dashboard_page(
@@ -1331,6 +1959,8 @@ def _dashboard_page(
     show_args: bool = False,
     logout_url: str | None = None,
     title: str = "fastapi-taskflow",
+    registered_tasks: str = "[]",
+    show_audit: bool = False,
 ) -> str:
     stream_url = f"{base_path}/dashboard/stream"
     logout_btn = (
@@ -1340,8 +1970,10 @@ def _dashboard_page(
         _DASHBOARD_TEMPLATE.replace("__STREAM_URL__", stream_url)
         .replace("__TASKS_PREFIX__", base_path)
         .replace("__SHOW_ARGS__", "true" if show_args else "false")
+        .replace("__SHOW_AUDIT__", "true" if show_audit else "false")
         .replace("__LOGOUT_BUTTON__", logout_btn)
         .replace("__TITLE__", title)
+        .replace("__REGISTERED_TASKS__", registered_tasks)
     )
 
 
@@ -1372,8 +2004,6 @@ def create_dashboard_router(
         """Return True if authenticated (or no auth configured)."""
         if secret_key is None:
             return True
-        from .auth import verify_token, COOKIE_NAME
-
         return verify_token(secret_key, request.cookies.get(COOKIE_NAME, ""))
 
     @router.get("", response_class=HTMLResponse)
@@ -1383,7 +2013,12 @@ def create_dashboard_router(
             return _Redirect(url=login_path, status_code=302)
         return HTMLResponse(
             _dashboard_page(
-                prefix, show_args=display_func_args, logout_url=logout_url, title=title
+                prefix,
+                show_args=display_func_args,
+                logout_url=logout_url,
+                title=title,
+                registered_tasks=_serialize_registry(task_manager.registry),
+                show_audit=secret_key is not None,
             )
         )
 

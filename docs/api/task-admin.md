@@ -16,6 +16,7 @@ TaskAdmin(
     secret_key: str | None = None,
     poll_interval: float = 30.0,
     title: str = "fastapi-taskflow",
+    retention_days: float | None = None,
 )
 ```
 
@@ -31,6 +32,7 @@ TaskAdmin(
 | `secret_key` | `str \| None` | `None` | HMAC signing key for tokens. Auto-generated if `None` and auth is configured. |
 | `poll_interval` | `float` | `30.0` | Seconds between dashboard poll requests when SSE is unavailable. |
 | `title` | `str` | `"fastapi-taskflow"` | Display name shown in the dashboard header badge and on the login page. |
+| `retention_days` | `float \| None` | `None` | Override the retention policy on `task_manager`. Terminal records older than this many days are pruned every ~6 hours. `None` leaves the manager's setting unchanged. |
 
 ## Usage
 
@@ -107,21 +109,51 @@ TaskAdmin(
 
 ### Without TaskAdmin
 
-If you are not using `TaskAdmin`, call `startup()` and `shutdown()` yourself inside a FastAPI lifespan handler:
+If you are not using `TaskAdmin`, use `init_app()` to register lifecycle hooks without mounting any routes:
 
-```python
-from contextlib import asynccontextmanager
+=== "v0.6.0+"
 
-@asynccontextmanager
-async def lifespan(app):
-    await task_manager.startup()
-    yield
-    await task_manager.shutdown()
+    ```python
+    from fastapi import FastAPI
+    from fastapi_taskflow import TaskManager
 
-app = FastAPI(lifespan=lifespan)
-```
+    task_manager = TaskManager(snapshot_db="tasks.db")
+    app = FastAPI()
+
+    task_manager.init_app(app)
+    ```
+
+=== "Before v0.6.0"
+
+    ```python
+    from contextlib import asynccontextmanager
+    from fastapi import FastAPI
+    from fastapi_taskflow import TaskManager
+
+    task_manager = TaskManager(snapshot_db="tasks.db")
+
+    @asynccontextmanager
+    async def lifespan(app):
+        await task_manager.startup()
+        yield
+        await task_manager.shutdown()
+
+    app = FastAPI(lifespan=lifespan)
+    ```
 
 Steps that are not applicable (e.g. no backend configured, no loggers) are skipped automatically.
+
+## Cancelling tasks
+
+`POST /tasks/{task_id}/cancel` accepts both `pending` and `running` tasks.
+
+**Pending tasks** are cancelled immediately: the status is set to `cancelled` in the store and flushed to the backend if one is configured.
+
+**Running async tasks** receive a cancellation signal via `asyncio.Task.cancel()`. The executor catches the resulting `CancelledError`, sets the status to `cancelled`, and flushes the record. The status transition happens asynchronously — the API response may still show `running` immediately after the call returns.
+
+**Running sync tasks** (functions dispatched to a thread pool) have their asyncio awaitable cancelled, which stops the event loop from waiting for the result. The underlying OS thread cannot be interrupted and runs to completion. The task is marked `cancelled` once the executor handles the `CancelledError` raised at the await point.
+
+Returns `400` if the task is in any other terminal or non-running state.
 
 ## Routes mounted
 
@@ -131,7 +163,11 @@ Relative to `path` (default `/tasks`):
 |--------|------|-------------|
 | `GET` | `/tasks` | List all tasks |
 | `GET` | `/tasks/metrics` | Aggregated statistics |
+| `GET` | `/tasks/audit` | Audit log of retry and cancel actions |
 | `GET` | `/tasks/{task_id}` | Single task detail |
+| `POST` | `/tasks/{task_id}/retry` | Retry a failed or interrupted task |
+| `POST` | `/tasks/{task_id}/cancel` | Cancel a pending or running task |
+| `DELETE` | `/tasks/history` | Delete completed task history older than a time window |
 | `GET` | `/tasks/dashboard` | HTML dashboard |
 | `GET` | `/tasks/dashboard/stream` | SSE stream (unauthenticated) |
 | `GET` | `/tasks/auth/login` | Login page *(auth only)* |

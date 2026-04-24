@@ -98,22 +98,78 @@ task_manager = TaskManager(
 
 ## Lifecycle
 
-`TaskManager` exposes `startup()` and `shutdown()` methods that initialise and tear down all subsystems in the correct order. If you are using `TaskAdmin`, these are called automatically. If not, call them yourself in a lifespan handler:
+`TaskManager` exposes three ways to wire up its lifecycle depending on how much you want to set up.
+
+### With `TaskAdmin`
+
+The simplest path. `TaskAdmin` calls `task_manager.init_app(app)` internally which registers startup and shutdown hooks automatically:
 
 ```python
-from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi_taskflow import TaskAdmin, TaskManager
+
+task_manager = TaskManager(snapshot_db="tasks.db")
+app = FastAPI()
+
+TaskAdmin(app, task_manager)
+```
+
+### With `init_app()` (no dashboard)
+
+Use `init_app()` when you want lifecycle management but not the dashboard or API routes:
+
+```python
 from fastapi import FastAPI
 from fastapi_taskflow import TaskManager
 
 task_manager = TaskManager(snapshot_db="tasks.db")
+app = FastAPI()
 
-@asynccontextmanager
-async def lifespan(app):
-    await task_manager.startup()
-    yield
-    await task_manager.shutdown()
-
-app = FastAPI(lifespan=lifespan)
+task_manager.init_app(app)
 ```
+
+`init_app()` is idempotent. Calling it more than once on the same app is safe.
+
+### With a lifespan handler
+
+=== "v0.6.0+"
+
+    ```python
+    from contextlib import asynccontextmanager
+    from fastapi import FastAPI
+    from fastapi_taskflow import TaskManager
+
+    task_manager = TaskManager(snapshot_db="tasks.db")
+    app = FastAPI()
+
+    task_manager.init_app(app)
+
+    # Or call startup/shutdown directly in the lifespan:
+    @asynccontextmanager
+    async def lifespan(app):
+        await task_manager.startup()
+        yield
+        await task_manager.shutdown()
+
+    app = FastAPI(lifespan=lifespan)
+    ```
+
+=== "Before v0.6.0"
+
+    ```python
+    from contextlib import asynccontextmanager
+    from fastapi import FastAPI
+    from fastapi_taskflow import TaskManager
+
+    task_manager = TaskManager(snapshot_db="tasks.db")
+
+    @asynccontextmanager
+    async def lifespan(app):
+        await task_manager.startup()
+        yield
+        await task_manager.shutdown()
+
+    app = FastAPI(lifespan=lifespan)
+    ```
 
 `startup()` and `shutdown()` are safe to call even when no subsystems are configured. Steps that are not applicable are skipped automatically.

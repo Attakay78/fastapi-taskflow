@@ -172,3 +172,81 @@ def test_retry_unregistered_function_returns_409():
     with TestClient(app) as client:
         resp = client.post("/tasks/r3/retry")
     assert resp.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# DELETE /tasks/history
+# ---------------------------------------------------------------------------
+
+
+def test_delete_history_removes_old_completed_tasks():
+    from datetime import datetime, timezone, timedelta
+    from fastapi_taskflow.models import TaskStatus
+
+    app, tm = _build_app()
+    old_end = datetime.now(timezone.utc) - timedelta(hours=2)
+    tm.store.create("old1", "dummy", (1,), {})
+    tm.store.update("old1", status=TaskStatus.SUCCESS, end_time=old_end)
+
+    with TestClient(app) as client:
+        resp = client.delete("/tasks/history?value=1&unit=hour")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["deleted"] == 1
+    assert data["store"] == 1
+    assert data["backend"] == 0
+    assert tm.store.get("old1") is None
+
+
+def test_delete_history_keeps_recent_tasks():
+    from datetime import datetime, timezone, timedelta
+    from fastapi_taskflow.models import TaskStatus
+
+    app, tm = _build_app()
+    recent_end = datetime.now(timezone.utc) - timedelta(minutes=10)
+    tm.store.create("new1", "dummy", (1,), {})
+    tm.store.update("new1", status=TaskStatus.SUCCESS, end_time=recent_end)
+
+    with TestClient(app) as client:
+        resp = client.delete("/tasks/history?value=1&unit=hour")
+
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] == 0
+    assert tm.store.get("new1") is not None
+
+
+def test_delete_history_invalid_unit_returns_400():
+    app, _ = _build_app()
+    with TestClient(app) as client:
+        resp = client.delete("/tasks/history?value=1&unit=week")
+    assert resp.status_code == 400
+
+
+def test_delete_history_missing_value_returns_422():
+    app, _ = _build_app()
+    with TestClient(app) as client:
+        resp = client.delete("/tasks/history?unit=hour")
+    assert resp.status_code == 422
+
+
+def test_delete_history_zero_value_returns_422():
+    app, _ = _build_app()
+    with TestClient(app) as client:
+        resp = client.delete("/tasks/history?value=0&unit=hour")
+    assert resp.status_code == 422
+
+
+def test_delete_history_skips_live_tasks():
+    from fastapi_taskflow.models import TaskStatus
+
+    app, tm = _build_app()
+    tm.store.create("live1", "dummy", (1,), {})
+    tm.store.update("live1", status=TaskStatus.RUNNING)
+
+    with TestClient(app) as client:
+        resp = client.delete("/tasks/history?value=1&unit=min")
+
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] == 0
+    assert tm.store.get("live1") is not None

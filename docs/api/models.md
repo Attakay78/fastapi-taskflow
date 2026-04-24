@@ -9,9 +9,34 @@ class TaskStatus(str, Enum):
     SUCCESS     = "success"
     FAILED      = "failed"
     INTERRUPTED = "interrupted"
+    CANCELLED   = "cancelled"
 ```
 
-`INTERRUPTED` is set when a task was mid-execution at shutdown and `requeue_on_interrupt` was not enabled. The task is saved to history and visible in the dashboard but is not re-executed automatically. It can be retried manually via `POST /tasks/{task_id}/retry`.
+| Value | Set when |
+|-------|----------|
+| `PENDING` | Task has been enqueued but has not started yet. |
+| `RUNNING` | Task is currently executing. |
+| `SUCCESS` | Task completed without raising an exception. |
+| `FAILED` | Task raised an exception on its final attempt. |
+| `INTERRUPTED` | Task was mid-execution at shutdown and `requeue_on_interrupt` was not enabled. Saved to history, visible in the dashboard, not re-executed automatically. Can be retried via `POST /tasks/{task_id}/retry`. |
+| `CANCELLED` | A pending task was cancelled before it started via `POST /tasks/{task_id}/cancel`. Terminal; the task will not run. |
+
+## AuditEntry
+
+An entry in the in-memory audit log. Written when a retry or cancel action is performed via the API.
+
+```python
+@dataclass
+class AuditEntry:
+    entry_id:  str
+    action:    str       # "retry" | "cancel"
+    task_id:   str
+    actor:     str       # username, or "anonymous" when auth is not configured
+    timestamp: datetime
+    detail:    dict      # e.g. {"new_task_id": "..."} for retries
+```
+
+The last 1000 entries are kept in memory. Access via `GET /tasks/audit`.
 
 ## TaskConfig
 

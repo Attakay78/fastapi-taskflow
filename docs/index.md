@@ -199,6 +199,12 @@ def signup(email: str, background_tasks: BackgroundTasks):
     <p>Run multiple instances behind a load balancer with SQLite (same host) or Redis (any host). Requeue claiming is atomic. Task history is shared across all instances.</p>
   </div>
 
+  <div class="feature-card">
+    <span class="icon">⏱</span>
+    <h3>Scheduled Tasks</h3>
+    <p>Register periodic tasks with <code>@task_manager.schedule(every=)</code> or a cron expression. Retries, logging, and the dashboard all work automatically. A distributed lock prevents double-firing in multi-instance deployments.</p>
+  </div>
+
   </div>
 </div>
 

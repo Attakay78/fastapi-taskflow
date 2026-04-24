@@ -70,6 +70,8 @@ open "http://localhost:8000/tasks/dashboard"
 
 ## What happens end to end
 
+**Manual task flow**
+
 ```mermaid
 sequenceDiagram
     participant Client
@@ -82,8 +84,8 @@ sequenceDiagram
 
     Client->>Route: POST /signup
     Route->>ManagedBackgroundTasks: add_task(send_email, address, tags={...})
-    Note over ManagedBackgroundTasks: capture context snapshot<br/>encrypt args if configured
-    ManagedBackgroundTasks->>TaskStore: create(task_id, PENDING, tags)
+    Note over ManagedBackgroundTasks: capture context snapshot<br/>encrypt args if configured<br/>source="manual"
+    ManagedBackgroundTasks->>TaskStore: create(task_id, PENDING, source=manual)
     ManagedBackgroundTasks-->>Route: task_id
     Route-->>Client: {"task_id": "..."}
 
@@ -91,6 +93,29 @@ sequenceDiagram
     Executor->>TaskStore: update(RUNNING)
     Executor->>Observer: on_lifecycle(RUNNING)
     Executor->>Executor: call send_email(address)
+    Note over Executor: task_log() calls emit LogEvent
+    Executor->>Observer: on_log(LogEvent)
+    Executor->>TaskStore: update(SUCCESS)
+    Executor->>Observer: on_lifecycle(SUCCESS)
+    Executor->>Backend: flush_one(task_id)
+```
+
+**Scheduled task flow**
+
+```mermaid
+sequenceDiagram
+    participant PeriodicScheduler
+    participant TaskStore
+    participant Executor
+    participant Observer
+    participant Backend
+
+    Note over PeriodicScheduler: every= interval or cron slot reached
+    PeriodicScheduler->>TaskStore: create(task_id, PENDING, source=scheduled)
+    PeriodicScheduler->>Executor: execute_task(func, task_id)
+    Executor->>TaskStore: update(RUNNING)
+    Executor->>Observer: on_lifecycle(RUNNING)
+    Executor->>Executor: call func()
     Note over Executor: task_log() calls emit LogEvent
     Executor->>Observer: on_log(LogEvent)
     Executor->>TaskStore: update(SUCCESS)

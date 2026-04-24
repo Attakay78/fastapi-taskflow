@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import collections
+import concurrent.futures
 import time
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+from fastapi import BackgroundTasks
+
+from .loggers.chain import LoggerChain
+from .loggers.file import FileLogger
 from .models import TaskConfig
 from .registry import TaskRegistry
 from .store import TaskStore
-
-from fastapi import BackgroundTasks
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -17,6 +21,7 @@ if TYPE_CHECKING:
     from .loggers.base import TaskObserver
     from .loggers.chain import LoggerChain
     from .models import TaskRecord
+    from .periodic import PeriodicScheduler
     from .wrapper import ManagedBackgroundTasks
 
 
@@ -64,6 +69,7 @@ class TaskManager:
         encrypt_args_key: Optional[bytes | str] = None,
         max_concurrent_tasks: Optional[int] = None,
         max_sync_threads: Optional[int] = None,
+        retention_days: Optional[float] = None,
     ) -> None:
         """
         Args:
@@ -148,6 +154,12 @@ class TaskManager:
                 tasks, or closer to ``os.cpu_count()`` for CPU-bound ones::
 
                     TaskManager(max_sync_threads=8)
+
+            retention_days: Automatically delete terminal task records (success,
+                failed, cancelled) older than this many days. Pruning runs
+                approximately every 6 hours during the snapshot loop. Defaults
+                to ``None`` (no automatic pruning). Can also be set via
+                ``TaskAdmin(retention_days=...)``.
         """
         self.registry = TaskRegistry()
         self.store = TaskStore()
@@ -159,8 +171,6 @@ class TaskManager:
             if max_concurrent_tasks is not None
             else None
         )
-
-        import concurrent.futures
 
         self._sync_executor: concurrent.futures.ThreadPoolExecutor | None = (
             concurrent.futures.ThreadPoolExecutor(
@@ -189,8 +199,6 @@ class TaskManager:
 
         all_loggers: list["TaskObserver"] = list(loggers or [])
         if log_file is not None:
-            from .loggers.file import FileLogger
-
             all_loggers.append(
                 FileLogger(
                     log_file,
@@ -203,8 +211,6 @@ class TaskManager:
 
         self.logger: Optional["LoggerChain"] = None
         if all_loggers:
-            from .loggers.chain import LoggerChain
-
             self.logger = LoggerChain(all_loggers)
 
         # Cache for merged_list() backend reads.
@@ -218,7 +224,12 @@ class TaskManager:
         # all racing to call backend.load() simultaneously when the cache expires.
         self._backend_cache_lock: asyncio.Lock | None = None
 
+        self._audit_log: collections.deque = collections.deque(maxlen=1000)
+        self._running_tasks: dict = {}
+
+        self._app: Optional["FastAPI"] = None
         self._scheduler = None
+        self._periodic_scheduler: Optional["PeriodicScheduler"] = None
         if snapshot_backend is not None or snapshot_db is not None:
             from .snapshot import SnapshotScheduler
 
@@ -232,11 +243,38 @@ class TaskManager:
                 backend=snapshot_backend,
                 interval=snapshot_interval,
                 requeue_pending=requeue_pending,
+                retention_days=retention_days,
             )
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    def init_app(self, app: "FastAPI") -> None:
+        """Register startup and shutdown hooks on *app*.
+
+        Calling this is equivalent to what :class:`~fastapi_taskflow.TaskAdmin`
+        does internally. Use it when you want lifecycle management without
+        mounting the dashboard or any other routes::
+
+            task_manager = TaskManager(snapshot_db="tasks.db")
+            app = FastAPI()
+            task_manager.init_app(app)
+
+        Calling this more than once on the same app is safe — the hooks are
+        only registered the first time.
+
+        :class:`~fastapi_taskflow.TaskAdmin` calls this automatically, so you
+        do not need to call it yourself when using ``TaskAdmin``.
+
+        Args:
+            app: The FastAPI application to attach lifecycle hooks to.
+        """
+        if self._app is app:
+            return
+        self._app = app
+        app.router.on_startup.append(self.startup)
+        app.router.on_shutdown.append(self.shutdown)
 
     async def startup(self) -> None:
         """Run all startup tasks for this manager.
@@ -265,6 +303,8 @@ class TaskManager:
             if self._scheduler._requeue_pending:
                 await self._scheduler.requeue()
             self._scheduler.start()
+        if self._periodic_scheduler is not None:
+            self._periodic_scheduler.start()
         if self.logger is not None:
             await self.logger.startup()
 
@@ -291,6 +331,8 @@ class TaskManager:
                 yield
                 await task_manager.shutdown()
         """
+        if self._periodic_scheduler is not None:
+            self._periodic_scheduler.stop()
         if self._scheduler is not None:
             self._scheduler.stop()
             await self._scheduler.flush()
@@ -350,6 +392,100 @@ class TaskManager:
                 requeue_on_interrupt=requeue_on_interrupt,
             )
             self.registry.register(func, config)
+            return func
+
+        return decorator
+
+    def schedule(
+        self,
+        *,
+        every: Optional[float] = None,
+        cron: Optional[str] = None,
+        retries: int = 0,
+        delay: float = 0.0,
+        backoff: float = 1.0,
+        name: Optional[str] = None,
+        run_on_startup: bool = False,
+        timezone: str = "UTC",
+    ) -> Callable:
+        """Register a function as a periodic background task.
+
+        The function is also registered in the task registry (as if
+        decorated with ``@task_manager.task()``), so it can be enqueued
+        manually via ``tasks.add_task()`` in addition to running on schedule.
+
+        Exactly one of *every* or *cron* must be provided.
+
+        Args:
+            every: Interval in seconds between runs. A value of ``300``
+                fires the task every 5 minutes. Mutually exclusive with
+                *cron*.
+            cron: Five-field cron expression (e.g. ``"0 * * * *"`` for
+                every hour). Requires ``pip install 'fastapi-taskflow[scheduler]'``.
+                Mutually exclusive with *every*.
+            retries: Number of additional attempts after the first failure.
+            delay: Seconds to wait before the first retry.
+            backoff: Multiplier applied to *delay* on each retry.
+            name: Override the display name in logs and the dashboard.
+            run_on_startup: When ``True``, fire the task on the first
+                scheduler tick (immediately after startup) rather than
+                waiting for the first interval or cron slot.
+            timezone: IANA timezone name used when evaluating *cron*
+                expressions (e.g. ``"America/New_York"``). Ignored when
+                *every* is used. Defaults to ``"UTC"``.
+
+        Example::
+
+            @task_manager.schedule(every=300, retries=1)
+            async def health_check() -> None:
+                ...
+
+            @task_manager.schedule(cron="0 9 * * *", timezone="America/New_York")
+            async def morning_report() -> None:
+                ...
+
+        Raises:
+            ValueError: If neither or both of *every* and *cron* are provided.
+            ImportError: If *cron* is used and ``croniter`` is not installed.
+        """
+        if (every is None) == (cron is None):
+            raise ValueError(
+                "Provide exactly one of 'every' (seconds) or 'cron' (expression)."
+            )
+
+        def decorator(func: Callable) -> Callable:
+            config = TaskConfig(
+                retries=retries,
+                delay=delay,
+                backoff=backoff,
+                name=name or func.__name__,
+            )
+            self.registry.register(func, config)
+
+            from .periodic import PeriodicScheduler, ScheduledEntry
+
+            entry = ScheduledEntry(
+                func=func,
+                config=config,
+                every=every,
+                cron=cron,
+                run_on_startup=run_on_startup,
+                timezone=timezone,
+            )
+
+            backend = self._scheduler._backend if self._scheduler is not None else None
+
+            if self._periodic_scheduler is None:
+                self._periodic_scheduler = PeriodicScheduler(self, [], backend=backend)
+                self._periodic_scheduler._entries.append(entry)
+            else:
+                # Scheduler already started — use _add_entry to push into
+                # the live heap and wake the loop immediately.
+                if self._periodic_scheduler._bg_task is not None:
+                    self._periodic_scheduler._add_entry(entry)
+                else:
+                    self._periodic_scheduler._entries.append(entry)
+
             return func
 
         return decorator
@@ -430,6 +566,11 @@ class TaskManager:
         # In-memory always wins -- live status is more current than the snapshot.
         merged.update(live)
         return list(merged.values())
+
+    def _invalidate_backend_cache(self) -> None:
+        """Force the next merged_list() call to reload from the backend."""
+        self._backend_cache = []
+        self._backend_cache_ts = 0.0
 
     def install(self, app: "FastAPI") -> None:
         """Patch FastAPI so existing ``BackgroundTasks`` routes get managed tasks automatically.

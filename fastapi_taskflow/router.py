@@ -1,11 +1,31 @@
 from __future__ import annotations
 
+import asyncio
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query, Request
+
+from .auth import COOKIE_NAME, decode_token
+from .executor import make_background_func
+from .models import AuditEntry, TaskStatus
+
+_UNIT_MAP = {
+    "min": "minutes",
+    "hour": "hours",
+    "day": "days",
+}
 
 if TYPE_CHECKING:
     from .manager import TaskManager
+
+
+def _actor(request: Request, secret_key: str | None) -> str:
+    """Return the authenticated username or 'anonymous'."""
+    if secret_key is None:
+        return "anonymous"
+    return decode_token(request.cookies.get(COOKIE_NAME, ""))
 
 
 def create_router(
@@ -39,6 +59,15 @@ def create_router(
             one per known task invocation.
         """
         return [t.to_dict() for t in await task_manager.merged_list()]
+
+    # Fixed paths must be defined before the /{task_id} catch-all.
+    @router.get("/audit", summary="Audit log of user actions")
+    def get_audit() -> list[dict[str, Any]]:
+        """Return the in-memory audit log (last 1000 entries, newest first).
+
+        Records retry and cancel actions with the actor username and timestamp.
+        """
+        return [e.to_dict() for e in reversed(task_manager._audit_log)]
 
     # Define /metrics before /{task_id} so the fixed path wins.
     @router.get("/metrics", summary="Aggregated task statistics")
@@ -96,8 +125,62 @@ def create_router(
             raise HTTPException(status_code=404, detail="Task not found")
         return record.to_dict()
 
+    @router.post("/{task_id}/cancel", summary="Cancel a pending or running task")
+    async def cancel_task(task_id: str, request: Request) -> dict[str, Any]:
+        """Cancel a task that is pending or currently running.
+
+        For ``pending`` tasks the status is set to ``cancelled`` immediately
+        and persisted. For ``running`` tasks the asyncio Task is cancelled;
+        the status transitions to ``cancelled`` asynchronously once the
+        executor handles the CancelledError.
+
+        Raises 404 if not found, 400 if the task cannot be cancelled.
+        """
+        record = task_manager.store.get(task_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        if record.status == TaskStatus.PENDING:
+            task_manager.store.update(
+                task_id,
+                status=TaskStatus.CANCELLED,
+                end_time=datetime.now(timezone.utc),
+            )
+            if task_manager._scheduler is not None:
+                await task_manager._scheduler.flush_one(task_id)
+
+        elif record.status == TaskStatus.RUNNING:
+            inner = task_manager._running_tasks.get(task_id)
+            if inner is None or inner.done():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Task is running but no cancellable handle is registered. "
+                    "Only async tasks support mid-execution cancellation.",
+                )
+            inner.cancel()
+
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Only pending or running tasks can be cancelled. "
+                f"Current status: {record.status.value}",
+            )
+
+        task_manager._audit_log.append(
+            AuditEntry(
+                entry_id=str(uuid.uuid4()),
+                action="cancel",
+                task_id=task_id,
+                actor=_actor(request, secret_key),
+                timestamp=datetime.now(timezone.utc),
+            )
+        )
+
+        updated = task_manager.store.get(task_id)
+        return {"task_id": task_id, "task": updated.to_dict() if updated else {}}
+
     @router.post("/{task_id}/retry", summary="Retry a failed or interrupted task")
-    async def retry_task(task_id: str) -> dict[str, Any]:
+    async def retry_task(task_id: str, request: Request) -> dict[str, Any]:
         """
         Re-enqueue a task that has status ``failed`` or ``interrupted``.
 
@@ -108,8 +191,6 @@ def create_router(
         Raises 404 if the task is not found, 400 if its status does not allow
         retry, or 409 if the function is no longer registered in the process.
         """
-        from .models import TaskStatus
-
         record = task_manager.store.get(task_id)
         if record is None and task_manager._scheduler is not None:
             all_records = await task_manager.merged_list()
@@ -133,15 +214,11 @@ def create_router(
             )
 
         func, config = result
-        import uuid
-
         new_task_id = str(uuid.uuid4())
 
         scheduler = task_manager._scheduler
         backend = scheduler._backend if scheduler is not None else None
         on_success = scheduler.flush_one if scheduler is not None else None
-
-        from .executor import make_background_func
 
         task_manager.store.create(
             new_task_id, func.__name__, record.args, record.kwargs, tags=record.tags
@@ -160,17 +237,71 @@ def create_router(
             encryptor=task_manager.fernet,
             semaphore=task_manager._task_semaphore,
             sync_executor=task_manager._sync_executor,
+            running_tasks=task_manager._running_tasks,
         )
 
-        # Schedule via asyncio directly since we have no BackgroundTasks instance here.
-        import asyncio
+        asyncio.create_task(wrapped())
 
-        asyncio.ensure_future(wrapped())
+        task_manager._audit_log.append(
+            AuditEntry(
+                entry_id=str(uuid.uuid4()),
+                action="retry",
+                task_id=task_id,
+                actor=_actor(request, secret_key),
+                timestamp=datetime.now(timezone.utc),
+                detail={"new_task_id": new_task_id},
+            )
+        )
 
         new_record = task_manager.store.get(new_task_id)
         return {
             "task_id": new_task_id,
             "task": new_record.to_dict() if new_record else {},
+        }
+
+    @router.delete("/history", summary="Delete task history older than a given window")
+    async def delete_history(
+        value: int = Query(..., gt=0, description="Number of time units."),
+        unit: str = Query(..., description="Time unit: min, hour, or day."),
+    ) -> dict[str, Any]:
+        """Delete terminal task records (success, failed, interrupted) whose
+        end_time is older than the given window.
+
+        Pending and running tasks are never deleted.
+
+        Args:
+            value: A positive integer.
+            unit: One of min, hour, day.
+
+        Returns:
+            Dict with ``deleted`` (total count), ``store`` (in-memory), and
+            ``backend`` (persisted) counts.
+
+        Raises:
+            HTTPException: 400 if unit is not recognised.
+        """
+        if unit not in _UNIT_MAP:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid unit '{unit}'. Accepted: {', '.join(_UNIT_MAP)}.",
+            )
+        delta = timedelta(**{_UNIT_MAP[unit]: value})
+
+        cutoff = datetime.now(timezone.utc) - delta
+
+        store_deleted = task_manager.store.delete_completed_before(cutoff)
+
+        backend_deleted = 0
+        if task_manager._scheduler is not None:
+            backend_deleted = await task_manager._scheduler._backend.delete_before(
+                cutoff
+            )
+            task_manager._invalidate_backend_cache()
+
+        return {
+            "deleted": store_deleted + backend_deleted,
+            "store": store_deleted,
+            "backend": backend_deleted,
         }
 
     return router

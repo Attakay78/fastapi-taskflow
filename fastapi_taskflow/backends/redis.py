@@ -24,12 +24,10 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from .base import SnapshotBackend
-
-if TYPE_CHECKING:
-    from ..models import TaskRecord
+from ..models import TaskRecord, TaskStatus
 
 _INDEX_SUFFIX = ":_index"
 _PENDING_SUFFIX = ":_pending"
@@ -119,12 +117,11 @@ class RedisBackend(SnapshotBackend):
             "encrypted_payload": record.encrypted_payload.decode()
             if record.encrypted_payload
             else "",
+            "source": record.source,
         }
 
     @staticmethod
     def _mapping_to_record(mapping: dict[str, str]) -> "TaskRecord":
-        from ..models import TaskRecord, TaskStatus
-
         return TaskRecord(
             task_id=mapping["task_id"],
             func_name=mapping["func_name"],
@@ -157,6 +154,7 @@ class RedisBackend(SnapshotBackend):
             encrypted_payload=(
                 enc.encode() if (enc := mapping.get("encrypted_payload")) else None
             ),
+            source=mapping.get("source") or "manual",
         )
 
     # ------------------------------------------------------------------
@@ -242,8 +240,6 @@ class RedisBackend(SnapshotBackend):
         return len(records)
 
     async def load_pending(self) -> "list[TaskRecord]":
-        from ..models import TaskRecord, TaskStatus
-
         client = self._get_client()
         task_ids = await client.smembers(self._pending_index_key())
         if not task_ids:
@@ -315,6 +311,10 @@ class RedisBackend(SnapshotBackend):
         # results[0] = number of keys deleted (1 if we got it, 0 if already gone)
         return results[0] == 1
 
+    @staticmethod
+    def _schedule_lock_key(key: str) -> str:
+        return f"taskflow:schedule_lock:{key}"
+
     def _idem_key(self, key: str) -> str:
         return f"{self._prefix}:idem:{key}"
 
@@ -329,6 +329,79 @@ class RedisBackend(SnapshotBackend):
         client = self._get_client()
         # NX = only set if not already recorded (first writer wins)
         await client.set(self._idem_key(key), task_id, nx=True)
+
+    async def delete_before(self, cutoff: datetime) -> int:
+        client = self._get_client()
+        task_ids = await client.smembers(self._index_key())
+        if not task_ids:
+            return 0
+
+        cutoff_iso = cutoff.isoformat()
+        pipe = client.pipeline()
+        for tid in task_ids:
+            pipe.hmget(
+                self._key(tid.decode() if isinstance(tid, bytes) else tid),
+                "end_time",
+                "status",
+            )
+        results = await pipe.execute()
+
+        to_delete = []
+        for tid, fields in zip(task_ids, results):
+            end_time_raw, status_raw = fields
+            if not end_time_raw or not status_raw:
+                continue
+            end_time = (
+                end_time_raw.decode()
+                if isinstance(end_time_raw, bytes)
+                else end_time_raw
+            )
+            status = (
+                status_raw.decode() if isinstance(status_raw, bytes) else status_raw
+            )
+            if status not in ("success", "failed", "interrupted"):
+                continue
+            if end_time < cutoff_iso:
+                to_delete.append(tid.decode() if isinstance(tid, bytes) else tid)
+
+        if not to_delete:
+            return 0
+
+        pipe = client.pipeline()
+        for tid in to_delete:
+            pipe.delete(self._key(tid))
+            pipe.srem(self._index_key(), tid)
+        await pipe.execute()
+        return len(to_delete)
+
+    async def completed_ids(self, task_ids: list[str]) -> set[str]:
+        if not task_ids:
+            return set()
+        client = self._get_client()
+        pipe = client.pipeline()
+        for task_id in task_ids:
+            pipe.hget(self._key(task_id), "status")
+        results = await pipe.execute()
+        return {
+            task_id
+            for task_id, status in zip(task_ids, results)
+            if status is not None
+            and (status.decode() if isinstance(status, bytes) else status) == "success"
+        }
+
+    async def acquire_schedule_lock(self, key: str, ttl: int) -> bool:
+        """Acquire a distributed schedule lock using Redis SET NX.
+
+        Args:
+            key: Lock identifier.
+            ttl: Lock lifetime in seconds.
+
+        Returns:
+            ``True`` if the lock was acquired, ``False`` otherwise.
+        """
+        client = self._get_client()
+        result = await client.set(self._schedule_lock_key(key), "1", nx=True, ex=ttl)
+        return result is not None
 
     async def close(self) -> None:
         if self._client is not None:

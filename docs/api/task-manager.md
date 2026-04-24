@@ -20,6 +20,7 @@ TaskManager(
     encrypt_args_key: bytes | str | None = None,
     max_concurrent_tasks: int | None = None,
     max_sync_threads: int | None = None,
+    retention_days: float | None = None,
 )
 ```
 
@@ -39,6 +40,7 @@ TaskManager(
 | `encrypt_args_key` | `bytes \| str` | `None` | Fernet key for encrypting task args and kwargs at rest. Requires `pip install "fastapi-taskflow[encryption]"`. |
 | `max_concurrent_tasks` | `int` | `None` | Maximum number of async tasks that may run concurrently. When set, an `asyncio.Semaphore` is used to cap concurrency, protecting request handlers from event loop pressure under burst task load. `None` disables the limit (existing behaviour). |
 | `max_sync_threads` | `int` | `None` | Size of the dedicated thread pool for sync task functions. When set, sync tasks run in an isolated `ThreadPoolExecutor` instead of the default asyncio pool, preventing task bursts from starving sync request handlers. `None` uses `asyncio.to_thread` (existing behaviour). |
+| `retention_days` | `float` | `None` | Automatically delete terminal task records (success, failed, cancelled) older than this many days. Pruning runs approximately every 6 hours during the snapshot loop. `None` disables automatic pruning. Can also be set via `TaskAdmin(retention_days=...)`. |
 
 ## Methods
 
@@ -68,6 +70,40 @@ def my_task(...) -> None:
 | `name` | `str` | function name | Override the name stored and shown in the dashboard. |
 | `requeue_on_interrupt` | `bool` | `False` | Requeue this task if it was mid-execution at shutdown. Only set for idempotent tasks that are safe to restart from scratch. |
 
+### `schedule()`
+
+Decorator factory that registers a function as a periodic background task. The function is also added to the task registry, so it can be enqueued manually via `add_task()` in addition to running on schedule.
+
+Exactly one of `every` or `cron` must be provided.
+
+```python
+@task_manager.schedule(
+    every: float | None = None,
+    cron: str | None = None,
+    retries: int = 0,
+    delay: float = 0.0,
+    backoff: float = 1.0,
+    name: str | None = None,
+    run_on_startup: bool = False,
+    timezone: str = "UTC",
+)
+async def my_scheduled_task() -> None:
+    ...
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `every` | `float \| None` | `None` | Interval in seconds between runs. Mutually exclusive with `cron`. |
+| `cron` | `str \| None` | `None` | Five-field cron expression (e.g. `"0 * * * *"`). Requires `pip install 'fastapi-taskflow[scheduler]'`. Mutually exclusive with `every`. |
+| `retries` | `int` | `0` | Additional attempts after the first failure. |
+| `delay` | `float` | `0.0` | Seconds before the first retry. |
+| `backoff` | `float` | `1.0` | Multiplier applied to `delay` on each subsequent retry. |
+| `name` | `str` | function name | Override the display name in logs and the dashboard. |
+| `run_on_startup` | `bool` | `False` | Fire the task immediately on the first scheduler tick rather than waiting for the first interval or cron slot. |
+| `timezone` | `str` | `"UTC"` | IANA timezone name used when evaluating `cron` expressions. Ignored when `every` is used. |
+
+Raises `ValueError` if neither or both of `every` and `cron` are provided. Raises `ImportError` if `cron` is used and `croniter` is not installed.
+
 ### `get_tasks(background_tasks)`
 
 FastAPI dependency. Returns a `ManagedBackgroundTasks` instance that shares the native request task list.
@@ -88,27 +124,63 @@ def route(background_tasks=Depends(task_manager.background_tasks)):
     task_id = background_tasks.add_task(my_func, arg)
 ```
 
-### `startup()`
+### `init_app(app)`
 
-Starts the snapshot scheduler, requeues pending tasks, and initialises the logger chain. Called automatically by `TaskAdmin` on app startup.
-
-Use this directly if you are managing the lifecycle yourself via a lifespan handler:
+Registers startup and shutdown hooks on `app`. The preferred way to wire lifecycle when not using `TaskAdmin`:
 
 ```python
-from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi_taskflow import TaskManager
 
-@asynccontextmanager
-async def lifespan(app):
-    await task_manager.startup()
-    yield
-    await task_manager.shutdown()
+task_manager = TaskManager(snapshot_db="tasks.db")
+app = FastAPI()
 
-app = FastAPI(lifespan=lifespan)
+task_manager.init_app(app)
 ```
+
+`TaskAdmin` calls this internally. Calling `init_app()` more than once on the same app is safe — hooks are only registered the first time.
+
+### `startup()`
+
+Starts the snapshot scheduler, requeues pending tasks, and initialises the logger chain. Called automatically via `init_app()` (and therefore by `TaskAdmin`).
+
+Call directly only when managing the lifecycle yourself without `init_app()`:
+
+=== "v0.6.0+"
+
+    Prefer `init_app()` over calling `startup()` and `shutdown()` directly — it registers the hooks for you:
+
+    ```python
+    from fastapi import FastAPI
+    from fastapi_taskflow import TaskManager
+
+    task_manager = TaskManager(snapshot_db="tasks.db")
+    app = FastAPI()
+
+    task_manager.init_app(app)
+    ```
+
+=== "Before v0.6.0"
+
+    ```python
+    from contextlib import asynccontextmanager
+    from fastapi import FastAPI
+    from fastapi_taskflow import TaskManager
+
+    task_manager = TaskManager(snapshot_db="tasks.db")
+
+    @asynccontextmanager
+    async def lifespan(app):
+        await task_manager.startup()
+        yield
+        await task_manager.shutdown()
+
+    app = FastAPI(lifespan=lifespan)
+    ```
 
 ### `shutdown()`
 
-Stops the scheduler, flushes completed and pending tasks to the backend, closes the logger chain, and shuts down the sync thread pool. Called automatically by `TaskAdmin` on app shutdown.
+Stops the scheduler, flushes completed and pending tasks to the backend, closes the logger chain, and shuts down the sync thread pool. Called automatically via `init_app()` (and therefore by `TaskAdmin`).
 
 ### `install(app)`
 
@@ -129,3 +201,5 @@ See [Injection Patterns](../guide/injection.md) for the full comparison.
 | `logger` | `LoggerChain \| None` | Active observer chain. Present when `loggers` was set or `log_file` was configured. |
 | `fernet` | `Fernet \| None` | Active Fernet encryptor. Present when `encrypt_args_key` was set. |
 | `_scheduler` | `SnapshotScheduler \| None` | Present if a backend was configured. |
+| `_audit_log` | `collections.deque` | In-memory ring buffer of the last 1000 `AuditEntry` records. Written on every retry and cancel action. |
+| `_running_tasks` | `dict[str, asyncio.Task]` | Maps `task_id` to the asyncio Task or Future currently executing that task. Populated when a task enters `RUNNING` state; removed on completion or cancellation. Used by `POST /tasks/{task_id}/cancel` to cancel running async tasks. |

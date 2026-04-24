@@ -85,6 +85,27 @@ python examples/observability_app.py
 
 ---
 
+## [scheduled_app.py](https://github.com/Attakay78/fastapi-taskflow/blob/main/examples/scheduled_app.py)
+
+Shows periodic tasks running at a fixed interval alongside manual trigger routes.
+
+**Covers:** `@task_manager.schedule(every=)`, `run_on_startup`, `retries`, manual trigger routes, listing registered schedules.
+
+```bash
+uvicorn examples.scheduled_app:app --reload
+
+# Trigger either scheduled task immediately
+curl -X POST "http://localhost:8000/health/run-now"
+curl -X POST "http://localhost:8000/cleanup/run-now"
+
+# List registered schedules and next run times
+curl "http://localhost:8000/schedule"
+
+open "http://localhost:8000/tasks/dashboard"
+```
+
+---
+
 ## [encryption_app.py](https://github.com/Attakay78/fastapi-taskflow/blob/main/examples/encryption_app.py)
 
 Demonstrates Fernet-based argument encryption. Task args and kwargs are encrypted at `add_task()` time and never stored in plain text. The dashboard and API show an `encrypted_payload` field in place of args.

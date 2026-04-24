@@ -41,3 +41,64 @@ def test_clear():
     store.create("t1", "f", (), {})
     store.clear()
     assert store.list() == []
+
+
+# ---------------------------------------------------------------------------
+# delete_completed_before
+# ---------------------------------------------------------------------------
+
+
+def test_delete_completed_before_removes_terminal_records():
+    from datetime import datetime, timezone, timedelta
+
+    store = TaskStore()
+    store.create("old", "f", (), {})
+    old_end = datetime.now(timezone.utc) - timedelta(hours=2)
+    store.update("old", status=TaskStatus.SUCCESS, end_time=old_end)
+
+    store.create("recent", "f", (), {})
+    recent_end = datetime.now(timezone.utc) - timedelta(minutes=5)
+    store.update("recent", status=TaskStatus.SUCCESS, end_time=recent_end)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+    deleted = store.delete_completed_before(cutoff)
+
+    assert deleted == 1
+    assert store.get("old") is None
+    assert store.get("recent") is not None
+
+
+def test_delete_completed_before_skips_live_tasks():
+    from datetime import datetime, timezone, timedelta
+
+    store = TaskStore()
+    store.create("pending", "f", (), {})
+    store.create("running", "f", (), {})
+    store.update("running", status=TaskStatus.RUNNING)
+
+    cutoff = datetime.now(timezone.utc) + timedelta(hours=1)
+    deleted = store.delete_completed_before(cutoff)
+
+    assert deleted == 0
+    assert store.get("pending") is not None
+    assert store.get("running") is not None
+
+
+def test_delete_completed_before_removes_failed_and_interrupted():
+    from datetime import datetime, timezone, timedelta
+
+    store = TaskStore()
+    old = datetime.now(timezone.utc) - timedelta(days=2)
+
+    store.create("f1", "f", (), {})
+    store.update("f1", status=TaskStatus.FAILED, end_time=old)
+
+    store.create("i1", "f", (), {})
+    store.update("i1", status=TaskStatus.INTERRUPTED, end_time=old)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+    deleted = store.delete_completed_before(cutoff)
+
+    assert deleted == 2
+    assert store.get("f1") is None
+    assert store.get("i1") is None

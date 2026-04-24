@@ -59,7 +59,8 @@ Async functions are awaited directly inside the executor. No extra setup needed.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> PENDING : add_task() called
+    [*] --> PENDING : add_task() called (source=manual)
+    [*] --> PENDING : PeriodicScheduler fires (source=scheduled)
     PENDING --> RUNNING : execution starts
     RUNNING --> SUCCESS : function returned
     RUNNING --> FAILED : all retries exhausted

@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from datetime import datetime
 from typing import Optional
 
 from .models import TaskRecord, TaskStatus
@@ -95,11 +96,23 @@ class TaskStore:
         idempotency_key: Optional[str] = None,
         tags: Optional[dict] = None,
         encrypted_payload: Optional[bytes] = None,
+        source: str = "manual",
     ) -> TaskRecord:
         """Create a new ``PENDING`` record and add it to the store.
 
         Called by :meth:`~fastapi_taskflow.wrapper.ManagedBackgroundTasks.add_task`
         immediately after a task is enqueued.
+
+        Args:
+            task_id: UUID string for the new task.
+            func_name: Name of the registered function.
+            args: Positional arguments passed to the function.
+            kwargs: Keyword arguments passed to the function.
+            idempotency_key: Optional deduplication key.
+            tags: Optional key/value labels.
+            encrypted_payload: Optional Fernet-encrypted args blob.
+            source: Origin of the task. ``"manual"`` for route-enqueued
+                tasks, ``"scheduled"`` for periodic scheduler fires.
         """
         record = TaskRecord(
             task_id=task_id,
@@ -110,6 +123,7 @@ class TaskStore:
             idempotency_key=idempotency_key,
             tags=tags or {},
             encrypted_payload=encrypted_payload,
+            source=source,
         )
         with self._lock:
             self._tasks[task_id] = record
@@ -179,6 +193,34 @@ class TaskStore:
         """Return a snapshot of all records currently in the store."""
         with self._lock:
             return list(self._tasks.values())
+
+    def delete_completed_before(self, cutoff: datetime) -> int:
+        """Remove terminal records from the store whose end_time is before *cutoff*.
+
+        Only removes success, failed, and interrupted records. Pending and
+        running records are never removed.
+
+        Returns:
+            Number of records removed.
+        """
+        _terminal = {
+            TaskStatus.SUCCESS,
+            TaskStatus.FAILED,
+            TaskStatus.INTERRUPTED,
+            TaskStatus.CANCELLED,
+        }
+        to_remove = []
+        with self._lock:
+            for task_id, record in self._tasks.items():
+                if (
+                    record.status in _terminal
+                    and record.end_time is not None
+                    and record.end_time < cutoff
+                ):
+                    to_remove.append(task_id)
+            for task_id in to_remove:
+                del self._tasks[task_id]
+        return len(to_remove)
 
     def clear(self) -> None:
         """Remove all records. Primarily used in tests."""

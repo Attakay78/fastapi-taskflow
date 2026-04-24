@@ -123,21 +123,49 @@ def _b64url_decode(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (padding % 4))
 
 
-def create_token(secret_key: str, expiry: int) -> str:
+def create_token(secret_key: str, expiry: int, username: str = "") -> str:
     """Create a signed HMAC-SHA256 JWT with an expiry claim.
 
     Args:
         secret_key: Secret used to sign the token.
         expiry: Token lifetime in seconds from now.
+        username: Optional subject claim embedded in the token. Used by the
+            audit log to record which user performed an action.
 
     Returns:
         A dot-separated ``header.payload.signature`` token string.
     """
     header = _b64url_encode(b'{"alg":"HS256","typ":"JWT"}')
-    body = _b64url_encode(json.dumps({"exp": int(time.time()) + expiry}).encode())
+    payload: dict = {"exp": int(time.time()) + expiry}
+    if username:
+        payload["sub"] = username
+    body = _b64url_encode(json.dumps(payload).encode())
     signing_input = f"{header}.{body}"
     sig = hmac.new(secret_key.encode(), signing_input.encode(), hashlib.sha256).digest()
     return f"{signing_input}.{_b64url_encode(sig)}"
+
+
+def decode_token(token: str) -> str:
+    """Extract the ``sub`` username from a token without re-verifying the signature.
+
+    Only call this after the request has already been authenticated by
+    :func:`make_api_guard`. Returns ``"anonymous"`` when the token has no
+    ``sub`` claim or cannot be decoded.
+
+    Args:
+        token: The raw token string from the session cookie.
+
+    Returns:
+        The username string, or ``"anonymous"``.
+    """
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return "anonymous"
+        payload = json.loads(_b64url_decode(parts[1]))
+        return payload.get("sub", "") or "anonymous"
+    except Exception:
+        return "anonymous"
 
 
 def verify_token(secret_key: str, token: str) -> bool:
@@ -355,7 +383,7 @@ def create_auth_router(
         password: str = Form(...),
     ):
         if backend.authenticate_user(username, password):
-            token = create_token(secret_key, token_expiry)
+            token = create_token(secret_key, token_expiry, username=username)
             response = RedirectResponse(url=dashboard_path, status_code=302)
             response.set_cookie(
                 COOKIE_NAME,

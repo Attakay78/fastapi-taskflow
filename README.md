@@ -43,6 +43,7 @@ fastapi-taskflow is a thin layer on top of what you already have. It does not co
 - Argument encryption: Fernet-based at-rest encryption for task args and kwargs
 - Trace context propagation: OpenTelemetry spans flow from the request into background execution (Python 3.11+)
 - Concurrency controls: opt-in semaphore for async tasks and dedicated thread pool for sync tasks
+- Scheduled tasks: `@task_manager.schedule(every=)` and `cron=` with distributed lock for multi-instance
 - Zero-migration injection: keep your existing `BackgroundTasks` annotations
 - Both sync and async task functions supported
 
@@ -52,15 +53,23 @@ fastapi-taskflow is a thin layer on top of what you already have. It does not co
 pip install fastapi-taskflow
 ```
 
-With Redis backend:
+With all optional dependencies:
+
+```bash
+pip install "fastapi-taskflow[all]"
+```
+
+Or install only what you need:
+
+| Extra | Installs | Required for |
+|-------|----------|--------------|
+| `redis` | `redis[asyncio]` | Redis persistence backend |
+| `scheduler` | `croniter` | Cron-based scheduled tasks |
+| `encryption` | `cryptography` | Argument encryption at rest |
 
 ```bash
 pip install "fastapi-taskflow[redis]"
-```
-
-With argument encryption:
-
-```bash
+pip install "fastapi-taskflow[scheduler]"
 pip install "fastapi-taskflow[encryption]"
 ```
 
@@ -268,6 +277,40 @@ task_manager = TaskManager(
 ```
 
 Both default to `None`. When not set, execution is identical to previous versions.
+
+## Scheduled tasks
+
+Run functions automatically at a fixed interval or on a cron expression. Scheduled tasks go through the same execution path as manually enqueued tasks, so retries, logging, persistence, and the dashboard all work without any extra setup.
+
+```python
+from fastapi import FastAPI
+from fastapi_taskflow import TaskAdmin, TaskManager, task_log
+
+task_manager = TaskManager(snapshot_db="tasks.db")
+app = FastAPI()
+TaskAdmin(app, task_manager)
+
+
+@task_manager.schedule(every=300, retries=1)
+async def health_check() -> None:
+    task_log("Running health check")
+    ...
+
+
+@task_manager.schedule(cron="0 2 * * *")
+def nightly_cleanup() -> None:
+    task_log("Starting cleanup")
+    ...
+
+
+@task_manager.schedule(cron="0 9 * * *", timezone="America/New_York")
+async def morning_report() -> None:
+    ...
+```
+
+Cron expressions require `pip install "fastapi-taskflow[scheduler]"`. Interval-based schedules have no extra dependencies. Cron expressions default to UTC. Pass any IANA timezone name with `timezone=` to evaluate in local time.
+
+Scheduled tasks also appear in the task registry, so they can be enqueued manually from a route alongside their automatic schedule. In multi-instance deployments, a distributed lock ensures only one instance fires each entry per interval.
 
 ## Custom dashboard title
 

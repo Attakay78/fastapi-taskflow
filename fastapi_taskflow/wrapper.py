@@ -135,6 +135,7 @@ class ManagedBackgroundTasks(BackgroundTasks):
             captured_ctx=captured_ctx,
             semaphore=self._task_manager._task_semaphore,
             sync_executor=self._task_manager._sync_executor,
+            running_tasks=self._task_manager._running_tasks,
         )
 
         super().add_task(wrapped)  # appends to self.tasks (shared with native if set)

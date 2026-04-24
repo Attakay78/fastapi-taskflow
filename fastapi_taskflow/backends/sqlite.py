@@ -5,13 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from datetime import datetime
-from typing import TYPE_CHECKING
-
+from datetime import datetime, timedelta
 from .base import SnapshotBackend
-
-if TYPE_CHECKING:
-    from ..models import TaskRecord
+from ..models import TaskRecord, TaskStatus
 
 _CREATE_HISTORY = """
 CREATE TABLE IF NOT EXISTS task_snapshots (
@@ -29,7 +25,8 @@ CREATE TABLE IF NOT EXISTS task_snapshots (
     kwargs_json       TEXT,
     logs_json         TEXT,
     stacktrace        TEXT,
-    encrypted_payload TEXT
+    encrypted_payload TEXT,
+    source            TEXT DEFAULT 'manual'
 )
 """
 
@@ -54,6 +51,13 @@ CREATE TABLE IF NOT EXISTS task_idempotency_keys (
 )
 """
 
+_CREATE_SCHEDULE_LOCKS = """
+CREATE TABLE IF NOT EXISTS task_schedule_locks (
+    lock_key   TEXT PRIMARY KEY,
+    expires_at TEXT NOT NULL
+)
+"""
+
 # Migrations applied to databases created before a column existed.
 _MIGRATIONS = [
     "ALTER TABLE task_snapshots ADD COLUMN args_json TEXT",
@@ -62,14 +66,15 @@ _MIGRATIONS = [
     "ALTER TABLE task_snapshots ADD COLUMN stacktrace TEXT",
     "ALTER TABLE task_snapshots ADD COLUMN encrypted_payload TEXT",
     "ALTER TABLE task_pending_requeue ADD COLUMN encrypted_payload TEXT",
+    "ALTER TABLE task_snapshots ADD COLUMN source TEXT DEFAULT 'manual'",
 ]
 
 _UPSERT_HISTORY = """
 INSERT OR REPLACE INTO task_snapshots
     (task_id, func_name, status, created_at, start_time, end_time,
      duration, retries_used, error, snapshotted_at, args_json, kwargs_json,
-     logs_json, stacktrace, encrypted_payload)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     logs_json, stacktrace, encrypted_payload, source)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _UPSERT_PENDING = """
@@ -123,6 +128,7 @@ class SqliteBackend(SnapshotBackend):
             conn.execute(_CREATE_HISTORY)
             conn.execute(_CREATE_PENDING)
             conn.execute(_CREATE_IDEMPOTENCY)
+            conn.execute(_CREATE_SCHEDULE_LOCKS)
             for migration in _MIGRATIONS:
                 try:
                     conn.execute(migration)
@@ -132,54 +138,59 @@ class SqliteBackend(SnapshotBackend):
     def _save_sync(self, records: "list[TaskRecord]") -> int:
         """Upsert *records* into the history table. Returns the number written."""
         now = datetime.utcnow().isoformat()
-        rows = [
-            (
-                t.task_id,
-                t.func_name,
-                t.status.value,
-                t.created_at.isoformat(),
-                t.start_time.isoformat() if t.start_time else None,
-                t.end_time.isoformat() if t.end_time else None,
-                t.duration,
-                t.retries_used,
-                t.error,
-                now,
-                json.dumps(list(t.args), default=repr),
-                json.dumps(t.kwargs, default=repr),
-                json.dumps(t.logs),
-                t.stacktrace,
-                t.encrypted_payload.decode() if t.encrypted_payload else None,
-            )
-            for t in records
-        ]
         with sqlite3.connect(self._db_path) as conn:
-            conn.executemany(_UPSERT_HISTORY, rows)
-        return len(rows)
+            conn.executemany(
+                _UPSERT_HISTORY,
+                (
+                    (
+                        t.task_id,
+                        t.func_name,
+                        t.status.value,
+                        t.created_at.isoformat(),
+                        t.start_time.isoformat() if t.start_time else None,
+                        t.end_time.isoformat() if t.end_time else None,
+                        t.duration,
+                        t.retries_used,
+                        t.error,
+                        now,
+                        json.dumps(list(t.args), default=repr),
+                        json.dumps(t.kwargs, default=repr),
+                        json.dumps(t.logs),
+                        t.stacktrace,
+                        t.encrypted_payload.decode() if t.encrypted_payload else None,
+                        t.source,
+                    )
+                    for t in records
+                ),
+            )
+        return len(records)
 
     def _save_pending_sync(self, records: "list[TaskRecord]") -> int:
         """Replace the pending table with *records*. Returns the number written."""
-        rows = [
-            (
-                t.task_id,
-                t.func_name,
-                t.created_at.isoformat(),
-                t.retries_used,
-                json.dumps(list(t.args), default=repr),
-                json.dumps(t.kwargs, default=repr),
-                t.encrypted_payload.decode() if t.encrypted_payload else None,
-            )
-            for t in records
-        ]
         with sqlite3.connect(self._db_path) as conn:
             conn.execute("DELETE FROM task_pending_requeue")
-            if rows:
-                conn.executemany(_UPSERT_PENDING, rows)
-        return len(rows)
+            if records:
+                conn.executemany(
+                    _UPSERT_PENDING,
+                    (
+                        (
+                            t.task_id,
+                            t.func_name,
+                            t.created_at.isoformat(),
+                            t.retries_used,
+                            json.dumps(list(t.args), default=repr),
+                            json.dumps(t.kwargs, default=repr),
+                            t.encrypted_payload.decode()
+                            if t.encrypted_payload
+                            else None,
+                        )
+                        for t in records
+                    ),
+                )
+        return len(records)
 
     def _load_pending_sync(self) -> "list[TaskRecord]":
         """Read all rows from the pending table and return them as TaskRecord objects."""
-        from ..models import TaskRecord, TaskStatus
-
         with sqlite3.connect(self._db_path) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("SELECT * FROM task_pending_requeue").fetchall()
@@ -244,10 +255,55 @@ class SqliteBackend(SnapshotBackend):
                 (key, task_id, datetime.utcnow().isoformat()),
             )
 
+    def _delete_before_sync(self, cutoff: str) -> int:
+        """Delete terminal records older than *cutoff* (ISO format). Returns count deleted."""
+        with sqlite3.connect(self._db_path) as conn:
+            cur = conn.execute(
+                "DELETE FROM task_snapshots"
+                " WHERE end_time IS NOT NULL AND end_time < ?"
+                " AND status IN ('success', 'failed', 'interrupted')",
+                (cutoff,),
+            )
+            return cur.rowcount
+
+    def _completed_ids_sync(self, task_ids: list[str]) -> set[str]:
+        """Return the subset of *task_ids* that exist in history with success status."""
+        placeholders = ",".join("?" * len(task_ids))
+        with sqlite3.connect(self._db_path) as conn:
+            rows = conn.execute(
+                f"SELECT task_id FROM task_snapshots WHERE task_id IN ({placeholders})"
+                " AND status = 'success'",
+                task_ids,
+            ).fetchall()
+        return {row[0] for row in rows}
+
+    def _acquire_schedule_lock_sync(self, key: str, ttl: int) -> bool:
+        """Try to insert a lock row, replacing it if it has expired.
+
+        Returns ``True`` if the lock was acquired, ``False`` if another
+        instance holds a live lock for *key*.
+        """
+        now = datetime.utcnow()
+        expires_at = (now + timedelta(seconds=ttl)).isoformat()
+        now_iso = now.isoformat()
+        with sqlite3.connect(self._db_path) as conn:
+            # Delete any expired lock for this key first.
+            conn.execute(
+                "DELETE FROM task_schedule_locks WHERE lock_key = ? AND expires_at <= ?",
+                (key, now_iso),
+            )
+            try:
+                conn.execute(
+                    "INSERT INTO task_schedule_locks (lock_key, expires_at) VALUES (?, ?)",
+                    (key, expires_at),
+                )
+                return True
+            except sqlite3.IntegrityError:
+                # Another instance holds a live (non-expired) lock.
+                return False
+
     def _load_sync(self) -> "list[TaskRecord]":
         """Read all rows from the history table and return them as TaskRecord objects."""
-        from ..models import TaskRecord, TaskStatus
-
         with sqlite3.connect(self._db_path) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("SELECT * FROM task_snapshots").fetchall()
@@ -283,6 +339,7 @@ class SqliteBackend(SnapshotBackend):
                     logs=json.loads(d["logs_json"]) if d.get("logs_json") else [],
                     stacktrace=d.get("stacktrace"),
                     encrypted_payload=enc.encode() if enc else None,
+                    source=d.get("source") or "manual",
                 )
             )
         return records
@@ -314,6 +371,17 @@ class SqliteBackend(SnapshotBackend):
 
     async def record_idempotency_key(self, key: str, task_id: str) -> None:
         await asyncio.to_thread(self._record_idempotency_key_sync, key, task_id)
+
+    async def delete_before(self, cutoff: datetime) -> int:
+        return await asyncio.to_thread(self._delete_before_sync, cutoff.isoformat())
+
+    async def completed_ids(self, task_ids: list[str]) -> set[str]:
+        if not task_ids:
+            return set()
+        return await asyncio.to_thread(self._completed_ids_sync, task_ids)
+
+    async def acquire_schedule_lock(self, key: str, ttl: int) -> bool:
+        return await asyncio.to_thread(self._acquire_schedule_lock_sync, key, ttl)
 
     async def close(self) -> None:
         pass  # SQLite connections are opened/closed per-operation

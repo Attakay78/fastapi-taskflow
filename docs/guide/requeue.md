@@ -93,7 +93,7 @@ sequenceDiagram
                 Scheduler->>Registry: get_by_name(func_name)
                 alt function found
                     Registry-->>Scheduler: func, config
-                    Scheduler->>Executor: ensure_future(execute_task)
+                    Scheduler->>Executor: create_task(execute_task)
                 else function not found
                     Scheduler->>Scheduler: log warning, skip
                 end

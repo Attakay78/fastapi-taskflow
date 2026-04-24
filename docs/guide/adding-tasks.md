@@ -99,7 +99,7 @@ from fastapi_taskflow.executor import make_background_func
 async def on_startup():
     tasks = ManagedBackgroundTasks(task_manager)
     task_id = tasks.add_task(sync_database)
-    asyncio.ensure_future(tasks.tasks[-1]())
+    asyncio.create_task(tasks.tasks[-1]())
 ```
 
 For most cases, the route-based patterns are simpler and preferred. Direct construction is only needed when no request context is available.

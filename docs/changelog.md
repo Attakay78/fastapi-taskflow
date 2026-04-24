@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.6.0
+
+Adds a periodic task scheduler with interval and cron triggers, distributed locking for multi-instance deployments, dashboard differentiation between scheduled and manual runs, and `TaskManager.init_app()` for lifecycle registration without `TaskAdmin`.
+
+### Scheduled tasks
+
+- Added `@task_manager.schedule(every=, cron=)` decorator. Registers a function as both a periodic task and a normal task registry entry so it can also be enqueued manually via `add_task()`.
+- `every=` accepts a float (seconds). No extra dependencies required.
+- `cron=` accepts a standard five-field cron expression. Requires `pip install "fastapi-taskflow[scheduler]"` (`croniter>=1.4`).
+- `retries`, `delay`, `backoff`, and `name` work the same as on `@task_manager.task()`.
+- `run_on_startup=True` fires the task on the first scheduler tick instead of waiting for the first interval or cron slot.
+- `PeriodicScheduler` runs a single `asyncio.Task` loop ticking every second. Started and stopped automatically by `TaskManager.startup()` and `TaskManager.shutdown()`.
+
+### Distributed lock
+
+- Added `acquire_schedule_lock(key, ttl)` to `SnapshotBackend`. Default implementation always returns `True`. `SqliteBackend` and `RedisBackend` implement proper distributed locking so only one instance fires each scheduled entry per interval.
+
+### TaskRecord source
+
+- Added `source` field to `TaskRecord`. Value is `"manual"` for tasks enqueued via `add_task()` (default, no behaviour change) and `"scheduled"` for tasks fired by the scheduler.
+- `source` is included in `TaskRecord.to_dict()` and the REST API response.
+
+### Dashboard
+
+- Scheduled task rows show a `scheduled` badge next to the function name.
+- New Schedules tab lists all registered entries, their trigger (interval or cron expression), and the next scheduled run time.
+- Dashboard tabs restructured: "Tasks" renamed to "View" (task run table); new "Tasks" tab lists all registered functions with their config as inline badges.
+- Added `DELETE /tasks/history?value=N&unit=<min|hour|day>` to delete completed tasks older than a given time window from both the in-memory store and the backend.
+- Added `TaskStore.delete_completed_before(cutoff)` to remove terminal records from the in-memory store where `end_time < cutoff`.
+- Added `cancelled` status with a dedicated badge and metrics card; `POST /tasks/{task_id}/cancel` now works for both pending and running tasks — async tasks are cancelled immediately, sync tasks stop being awaited while the underlying thread completes.
+- Added Dead Letters tab (failed tasks only), auth-gated Audit tab, drag-resizable detail panel, P95 duration in function analytics, and cancel button in the detail panel for pending and running tasks.
+
+### Retention
+
+- Added `retention_days` parameter to `TaskManager` and `TaskAdmin`. When set, terminal records (`success`, `failed`, `cancelled`) whose `end_time` is older than the configured number of days are pruned automatically every ~6 hours during the snapshot loop. `TaskAdmin(retention_days=...)` overrides the manager's setting at mount time. Pending and running tasks are never deleted.
+
+### Lifecycle
+
+- Added `TaskManager.init_app(app)`. Registers startup and shutdown hooks on a FastAPI app without requiring `TaskAdmin`. `TaskAdmin` calls this internally. Calling it more than once on the same app is safe.
+
+---
+
 ## v0.5.1
 
 Dashboard login screen updated to match the teal theme. `TaskAdmin` gains a `title` parameter to customise the display name shown in the dashboard header and login page.

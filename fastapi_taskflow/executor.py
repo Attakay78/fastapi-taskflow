@@ -14,6 +14,8 @@ import concurrent.futures
 import contextvars
 import functools
 import inspect
+import pickle
+import sys
 import traceback
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional
@@ -29,6 +31,8 @@ from .task_logging import (
 if TYPE_CHECKING:
     from .backends.base import SnapshotBackend
     from .loggers.base import TaskObserver
+
+from .loggers.base import LifecycleEvent, LogEvent
 
 
 def _build_exec_ctx(
@@ -79,7 +83,7 @@ def _schedule_log(
 ) -> None:
     """Schedule *coro* and append the resulting future to *pending* for later draining.
 
-    When called from the event loop thread, ``ensure_future`` is used and an
+    When called from the event loop thread, ``create_task`` is used and an
     ``asyncio.Task`` is appended. When called from a thread-pool thread (sync tasks
     run via ``asyncio.to_thread``), ``run_coroutine_threadsafe`` is used and a
     ``concurrent.futures.Future`` is appended. In both cases the caller drains
@@ -122,6 +126,7 @@ async def execute_task(
     captured_ctx: Optional[contextvars.Context] = None,
     semaphore: Optional[asyncio.Semaphore] = None,
     sync_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None,
+    running_tasks: Optional[dict] = None,
 ) -> None:
     """Run *func* through the full task lifecycle: PENDING -> RUNNING -> SUCCESS | FAILED.
 
@@ -171,8 +176,12 @@ async def execute_task(
             exhausting threads needed by sync request handlers. Corresponds to
             ``max_sync_threads`` on :class:`~fastapi_taskflow.TaskManager`.
     """
-    if semaphore is not None:
-        await semaphore.acquire()
+    # The semaphore caps concurrent async task execution only. Sync tasks run
+    # in a ThreadPoolExecutor whose max_workers already limits concurrency
+    use_semaphore = semaphore is not None and inspect.iscoroutinefunction(func)
+
+    if use_semaphore:
+        await semaphore.acquire()  # type: ignore[union-attr]
 
     try:
         await _execute_task_inner(
@@ -188,10 +197,11 @@ async def execute_task(
             encryptor=encryptor,
             captured_ctx=captured_ctx,
             sync_executor=sync_executor,
+            running_tasks=running_tasks,
         )
     finally:
-        if semaphore is not None:
-            semaphore.release()
+        if use_semaphore:
+            semaphore.release()  # type: ignore[union-attr]
 
 
 async def _execute_task_inner(
@@ -207,11 +217,10 @@ async def _execute_task_inner(
     encryptor: Any = None,
     captured_ctx: Optional[contextvars.Context] = None,
     sync_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None,
+    running_tasks: Optional[dict] = None,
 ) -> None:
     """Inner execution body. Called by :func:`execute_task` after the optional
     semaphore is acquired. Not intended for direct use."""
-    from .loggers.base import LifecycleEvent, LogEvent
-
     record = store.get(task_id)
     func_name = func.__name__
     tags: dict[str, str] = record.tags if record is not None else {}
@@ -223,8 +232,6 @@ async def _execute_task_inner(
         and record.encrypted_payload is not None
         and encryptor is not None
     ):
-        import pickle
-
         actual_args, actual_kwargs = pickle.loads(
             encryptor.decrypt(record.encrypted_payload)
         )
@@ -248,8 +255,8 @@ async def _execute_task_inner(
             )
             return
 
-    start_time = datetime.now(timezone.utc)
-    store.update(task_id, status=TaskStatus.RUNNING, start_time=start_time)
+    task_start = datetime.now(timezone.utc)
+    store.update(task_id, status=TaskStatus.RUNNING, start_time=task_start)
 
     if logger is not None:
         await logger.on_lifecycle(
@@ -257,7 +264,7 @@ async def _execute_task_inner(
                 task_id=task_id,
                 func_name=func_name,
                 status=TaskStatus.RUNNING,
-                timestamp=start_time,
+                timestamp=task_start,
                 attempt=0,
                 retries_used=0,
                 tags=tags,
@@ -292,131 +299,188 @@ async def _execute_task_inner(
     delay = config.delay
     last_error: Exception | None = None
     last_tb: str | None = None
+    # exec_start default covers the case where CancelledError fires before the
+    # first attempt sets it (e.g. during a retry sleep).
+    exec_start = task_start
+    # Reference to the asyncio Task/Future running the current attempt.
+    # Stored so the cancel endpoint can call .cancel() on it directly.
+    _inner_task: Optional[asyncio.Task] = None
 
-    for attempt in range(config.retries + 1):
-        _state["attempt"] = attempt
+    try:
+        for attempt in range(config.retries + 1):
+            _state["attempt"] = attempt
 
-        if attempt > 0:
-            await asyncio.sleep(delay)
-            delay *= config.backoff
-            store.update(task_id, retries_used=attempt)
-            store.append_log(task_id, f"--- Retry {attempt} ---")
+            if attempt > 0:
+                await asyncio.sleep(delay)
+                delay *= config.backoff
+                store.update(task_id, retries_used=attempt)
+                store.append_log(task_id, f"--- Retry {attempt} ---")
 
-        ctx_obj = TaskContext(
-            task_id=task_id,
-            func_name=func_name,
-            attempt=attempt,
-            tags=tags,
+            ctx_obj = TaskContext(
+                task_id=task_id,
+                func_name=func_name,
+                attempt=attempt,
+                tags=tags,
+            )
+
+            # Build an execution context that merges trace context (from captured_ctx)
+            # with the task-specific log sink and TaskContext vars.
+            exec_ctx = _build_exec_ctx(captured_ctx, sink, ctx_obj)
+
+            # Capture execution time around the function call only, excluding
+            # retry delays, status updates, and other lifecycle overhead.
+            exec_start = datetime.now(timezone.utc)
+
+            try:
+                if inspect.iscoroutinefunction(func):
+                    # asyncio.create_task supports context= only on Python 3.11+.
+                    # On older versions fall back to a wrapper coroutine that sets
+                    # the task-specific vars directly; trace context propagation
+                    # is best-effort and requires Python 3.11+.
+                    if sys.version_info >= (3, 11):
+                        _inner_task = asyncio.create_task(
+                            func(*actual_args, **actual_kwargs), context=exec_ctx
+                        )
+                    else:
+
+                        async def _run_in_ctx() -> None:
+                            t1 = _log_sink.set(sink)
+                            t2 = _task_context.set(ctx_obj)
+                            try:
+                                await func(*actual_args, **actual_kwargs)
+                            finally:
+                                _log_sink.reset(t1)
+                                _task_context.reset(t2)
+
+                        _inner_task = asyncio.create_task(_run_in_ctx())
+                else:
+                    # Run the sync function in a thread, inside exec_ctx so both
+                    # trace vars and task_log() work correctly.
+                    # When a dedicated executor is configured, use it to isolate
+                    # sync task threads from the default asyncio thread pool used
+                    # by sync request handlers.
+                    _loop = asyncio.get_running_loop()
+                    if sync_executor is not None:
+                        # run_in_executor does not support kwargs directly.
+                        # Use functools.partial to bind both args and kwargs before
+                        # passing to exec_ctx.run so keyword arguments are preserved.
+                        _inner_task = asyncio.ensure_future(
+                            _loop.run_in_executor(
+                                sync_executor,
+                                functools.partial(
+                                    exec_ctx.run, func, *actual_args, **actual_kwargs
+                                ),
+                            )
+                        )
+                    else:
+                        _inner_task = asyncio.ensure_future(
+                            asyncio.to_thread(
+                                exec_ctx.run, func, *actual_args, **actual_kwargs
+                            )
+                        )
+
+                if running_tasks is not None:
+                    running_tasks[task_id] = _inner_task
+                await _inner_task
+                _inner_task = None
+
+                await _drain_pending(_pending_log)
+
+                end_time = datetime.now(timezone.utc)
+                store.update(task_id, status=TaskStatus.SUCCESS, end_time=end_time)
+
+                if logger is not None:
+                    duration = (end_time - exec_start).total_seconds()
+                    await logger.on_lifecycle(
+                        LifecycleEvent(
+                            task_id=task_id,
+                            func_name=func_name,
+                            status=TaskStatus.SUCCESS,
+                            timestamp=end_time,
+                            attempt=attempt,
+                            retries_used=attempt,
+                            duration=duration,
+                            tags=tags,
+                        )
+                    )
+
+                if on_success is not None:
+                    await on_success(task_id)
+                if (
+                    record is not None
+                    and record.idempotency_key
+                    and backend is not None
+                ):
+                    await backend.record_idempotency_key(
+                        record.idempotency_key, task_id
+                    )
+                return
+
+            except Exception as exc:  # noqa: BLE001
+                _inner_task = None
+                last_error = exc
+                last_tb = traceback.format_exc()
+
+        await _drain_pending(_pending_log)
+
+        end_time = datetime.now(timezone.utc)
+        store.update(
+            task_id,
+            status=TaskStatus.FAILED,
+            end_time=end_time,
+            error=str(last_error),
+            stacktrace=last_tb,
         )
 
-        # Build an execution context that merges trace context (from captured_ctx)
-        # with the task-specific log sink and TaskContext vars.
-        exec_ctx = _build_exec_ctx(captured_ctx, sink, ctx_obj)
+        if logger is not None:
+            duration = (end_time - exec_start).total_seconds()
+            await logger.on_lifecycle(
+                LifecycleEvent(
+                    task_id=task_id,
+                    func_name=func_name,
+                    status=TaskStatus.FAILED,
+                    timestamp=end_time,
+                    attempt=config.retries,
+                    retries_used=config.retries,
+                    duration=duration,
+                    error=str(last_error),
+                    stacktrace=last_tb,
+                    tags=tags,
+                )
+            )
 
-        try:
-            if inspect.iscoroutinefunction(func):
-                # asyncio.create_task supports context= only on Python 3.11+.
-                # On older versions fall back to a wrapper coroutine that sets
-                # the task-specific vars directly; trace context propagation
-                # is best-effort and requires Python 3.11+.
-                import sys
-
-                if sys.version_info >= (3, 11):
-                    task = asyncio.create_task(
-                        func(*actual_args, **actual_kwargs), context=exec_ctx
-                    )
-                    await task
-                else:
-
-                    async def _run_in_ctx() -> None:
-                        t1 = _log_sink.set(sink)
-                        t2 = _task_context.set(ctx_obj)
-                        try:
-                            await func(*actual_args, **actual_kwargs)
-                        finally:
-                            _log_sink.reset(t1)
-                            _task_context.reset(t2)
-
-                    await _run_in_ctx()
-            else:
-                # Run the sync function in a thread, inside exec_ctx so both
-                # trace vars and task_log() work correctly.
-                # When a dedicated executor is configured, use it to isolate
-                # sync task threads from the default asyncio thread pool used
-                # by sync request handlers.
-                _loop = asyncio.get_running_loop()
-                if sync_executor is not None:
-                    # run_in_executor does not support kwargs directly.
-                    # Use functools.partial to bind both args and kwargs before
-                    # passing to exec_ctx.run so keyword arguments are preserved.
-                    await _loop.run_in_executor(
-                        sync_executor,
-                        functools.partial(
-                            exec_ctx.run, func, *actual_args, **actual_kwargs
-                        ),
-                    )
-                else:
-                    await asyncio.to_thread(
-                        exec_ctx.run, func, *actual_args, **actual_kwargs
-                    )
-
-            await _drain_pending(_pending_log)
-
-            end_time = datetime.now(timezone.utc)
-            store.update(task_id, status=TaskStatus.SUCCESS, end_time=end_time)
-
+    except asyncio.CancelledError:
+        # Cancel the inner function task if it is still running (async tasks).
+        # For sync tasks running in a thread pool, the thread cannot be
+        # interrupted; cancellation stops the await but the thread runs to
+        # completion in the background.
+        if _inner_task is not None and not _inner_task.done():
+            _inner_task.cancel()
+        await _drain_pending(_pending_log)
+        end_time = datetime.now(timezone.utc)
+        current = store.get(task_id)
+        if current is not None and current.status == TaskStatus.RUNNING:
+            store.update(task_id, status=TaskStatus.CANCELLED, end_time=end_time)
             if logger is not None:
-                duration = (end_time - start_time).total_seconds()
+                duration = (end_time - exec_start).total_seconds()
                 await logger.on_lifecycle(
                     LifecycleEvent(
                         task_id=task_id,
                         func_name=func_name,
-                        status=TaskStatus.SUCCESS,
+                        status=TaskStatus.CANCELLED,
                         timestamp=end_time,
-                        attempt=attempt,
-                        retries_used=attempt,
+                        attempt=_state["attempt"],
+                        retries_used=_state["attempt"],
                         duration=duration,
                         tags=tags,
                     )
                 )
-
             if on_success is not None:
                 await on_success(task_id)
-            if record is not None and record.idempotency_key and backend is not None:
-                await backend.record_idempotency_key(record.idempotency_key, task_id)
-            return
 
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            last_tb = traceback.format_exc()
-
-    await _drain_pending(_pending_log)
-
-    end_time = datetime.now(timezone.utc)
-    store.update(
-        task_id,
-        status=TaskStatus.FAILED,
-        end_time=end_time,
-        error=str(last_error),
-        stacktrace=last_tb,
-    )
-
-    if logger is not None:
-        duration = (end_time - start_time).total_seconds()
-        await logger.on_lifecycle(
-            LifecycleEvent(
-                task_id=task_id,
-                func_name=func_name,
-                status=TaskStatus.FAILED,
-                timestamp=end_time,
-                attempt=config.retries,
-                retries_used=config.retries,
-                duration=duration,
-                error=str(last_error),
-                stacktrace=last_tb,
-                tags=tags,
-            )
-        )
+    finally:
+        if running_tasks is not None:
+            running_tasks.pop(task_id, None)
 
 
 def make_background_func(
@@ -433,6 +497,7 @@ def make_background_func(
     captured_ctx: Optional[contextvars.Context] = None,
     semaphore: Optional[asyncio.Semaphore] = None,
     sync_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None,
+    running_tasks: Optional[dict] = None,
 ) -> Callable:
     """Wrap *func* into a zero-argument async callable for ``BackgroundTasks.add_task``.
 
@@ -477,6 +542,7 @@ def make_background_func(
             captured_ctx=captured_ctx,
             semaphore=semaphore,
             sync_executor=sync_executor,
+            running_tasks=running_tasks,
         )
 
     _wrapped.__name__ = f"_bg_{func.__name__}_{task_id[:8]}"

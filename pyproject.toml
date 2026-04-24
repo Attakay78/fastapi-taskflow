@@ -1,6 +1,6 @@
 [project]
 name = "fastapi-taskflow"
-version = "0.5.1"
+version = "0.6.0"
 description = "Turn FastAPI BackgroundTasks into a production-ready task system. Retries, control, resiliency and visibility without workers or brokers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,7 +25,15 @@ dependencies = [
 redis = [
     "redis[asyncio]>=5.0",
 ]
+scheduler = [
+    "croniter>=1.4",
+]
 encryption = [
+    "cryptography>=41.0",
+]
+all = [
+    "redis[asyncio]>=5.0",
+    "croniter>=1.4",
     "cryptography>=41.0",
 ]
 dev = [
@@ -41,6 +49,7 @@ docs = [
 
 [tool.uv]
 dev-dependencies = [
+    "croniter>=1.4",
     "cryptography>=41.0",
     "httpx>=0.28.1",
     "mkdocs-material>=9.5",

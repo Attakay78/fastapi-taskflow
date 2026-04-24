@@ -76,6 +76,7 @@ nav:
     - File Logging: guide/file-logging.md
     - Argument Encryption: guide/encryption.md
     - Concurrency Controls: guide/concurrency.md
+    - Scheduled Tasks: guide/scheduled-tasks.md
     - Persistence: guide/persistence.md
     - Pending Requeue: guide/requeue.md
     - Custom Backends: guide/backends.md
@@ -90,5 +91,6 @@ nav:
     - Loggers: api/task-file-logger.md
     - Models: api/models.md
     - Backends: api/backends.md
+    - Scheduled Tasks: api/scheduled-tasks.md
   - Examples: examples.md
   - Changelog: changelog.md

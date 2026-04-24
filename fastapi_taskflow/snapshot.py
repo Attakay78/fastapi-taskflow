@@ -26,7 +26,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
+
+from .loggers.base import LifecycleEvent
+from .models import TaskStatus
 
 if TYPE_CHECKING:
     from .backends.base import SnapshotBackend
@@ -61,6 +65,7 @@ class SnapshotScheduler:
         backend: "SnapshotBackend | None" = None,
         interval: float = 60.0,
         requeue_pending: bool = False,
+        retention_days: float | None = None,
         # Legacy keyword kept for backwards-compatibility.
         db_path: str | None = None,
     ) -> None:
@@ -75,7 +80,11 @@ class SnapshotScheduler:
         self._backend = backend
         self._interval = interval
         self._requeue_pending = requeue_pending
+        self._retention_days = retention_days
         self._bg_task: asyncio.Task | None = None
+        self._retention_counter: int = 0
+        # Run retention every ~6 hours regardless of snapshot interval.
+        self._retention_every: int = max(1, round(21600 / max(interval, 1)))
 
     # ------------------------------------------------------------------
     # Startup
@@ -112,12 +121,10 @@ class SnapshotScheduler:
 
         from .executor import execute_task
 
-        # Load completed history task_ids once so we can skip tasks that
-        # already succeeded before the crash (Scenario A crash recovery).
-        history_records = await self._backend.load()
-        completed_ids = {
-            r.task_id for r in history_records if r.status.value == "success"
-        }
+        # Check only the pending task IDs against history — avoids loading
+        # the full history just to find a handful of already-completed tasks.
+        pending_ids = [r.task_id for r in records]
+        completed_ids = await self._backend.completed_ids(pending_ids)
 
         dispatched = 0
         for record in records:
@@ -159,7 +166,7 @@ class SnapshotScheduler:
             # Ensure the task record is in the store so the dashboard shows it.
             self._task_manager.store.restore(record)
 
-            asyncio.ensure_future(
+            asyncio.create_task(
                 execute_task(
                     func,
                     record.task_id,
@@ -201,7 +208,7 @@ class SnapshotScheduler:
         completed = [
             t
             for t in self._task_manager.store.list()
-            if t.status.value in ("success", "failed")
+            if t.status.value in ("success", "failed", "cancelled")
         ]
         if not completed:
             return 0
@@ -239,10 +246,6 @@ class SnapshotScheduler:
         Returns:
             Number of records saved to the pending store.
         """
-        from datetime import datetime
-
-        from .models import TaskStatus
-
         unfinished = [
             t
             for t in self._task_manager.store.list()
@@ -270,15 +273,13 @@ class SnapshotScheduler:
                 else:
                     # Mark as INTERRUPTED in the store and flush to history so
                     # it's visible in the dashboard but will not be re-executed.
-                    end_time = datetime.utcnow()
+                    end_time = datetime.now(timezone.utc)
                     self._task_manager.store.update(
                         t.task_id,
                         status=TaskStatus.INTERRUPTED,
                         end_time=end_time,
                     )
                     if self._task_manager.logger is not None:
-                        from .loggers.base import LifecycleEvent
-
                         await self._task_manager.logger.on_lifecycle(
                             LifecycleEvent(
                                 task_id=t.task_id,
@@ -306,7 +307,7 @@ class SnapshotScheduler:
 
     def start(self) -> None:
         """Start the background periodic flush loop."""
-        self._bg_task = asyncio.ensure_future(self._run())
+        self._bg_task = asyncio.create_task(self._run())
 
     def stop(self) -> None:
         """Cancel the background loop."""
@@ -318,6 +319,26 @@ class SnapshotScheduler:
         while True:
             await asyncio.sleep(self._interval)
             await self.flush()
+            if self._retention_days is not None:
+                self._retention_counter += 1
+                if self._retention_counter >= self._retention_every:
+                    self._retention_counter = 0
+                    await self._prune_old_records()
+
+    async def _prune_old_records(self) -> None:
+        from datetime import timedelta
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self._retention_days)  # type: ignore[arg-type]
+        store_deleted = self._task_manager.store.delete_completed_before(cutoff)
+        backend_deleted = await self._backend.delete_before(cutoff)
+        if store_deleted or backend_deleted:
+            self._task_manager._invalidate_backend_cache()
+            logger.info(
+                "fastapi-taskflow: retention pruned %d store + %d backend records older than %.1f days",
+                store_deleted,
+                backend_deleted,
+                self._retention_days,
+            )
 
     # ------------------------------------------------------------------
     # SQLite query passthrough
