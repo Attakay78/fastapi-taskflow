@@ -316,6 +316,12 @@ class SnapshotScheduler:
             self._bg_task = None
 
     async def _run(self) -> None:
+        """Periodic flush loop. Runs for the lifetime of the application.
+
+        Sleeps for *interval* seconds, then flushes all completed tasks to the
+        backend. Every *_retention_every* flushes, also prunes old records when
+        *retention_days* is configured.
+        """
         while True:
             await asyncio.sleep(self._interval)
             await self.flush()
@@ -326,6 +332,12 @@ class SnapshotScheduler:
                     await self._prune_old_records()
 
     async def _prune_old_records(self) -> None:
+        """Delete terminal records older than *retention_days* from the store and backend.
+
+        Removes records whose ``end_time`` is before the computed cutoff from
+        both the in-memory store and the backend. Invalidates the merged-list
+        cache so the dashboard reflects the deletion immediately.
+        """
         from datetime import timedelta
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=self._retention_days)  # type: ignore[arg-type]

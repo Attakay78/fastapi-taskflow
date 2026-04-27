@@ -56,6 +56,8 @@ Decorator factory that registers a function with execution configuration.
     persist: bool = False,
     name: str | None = None,
     requeue_on_interrupt: bool = False,
+    eager: bool = False,
+    priority: int | None = None,
 )
 def my_task(...) -> None:
     ...
@@ -69,6 +71,8 @@ def my_task(...) -> None:
 | `persist` | `bool` | `False` | Save this task for requeue on restart. |
 | `name` | `str` | function name | Override the name stored and shown in the dashboard. |
 | `requeue_on_interrupt` | `bool` | `False` | Requeue this task if it was mid-execution at shutdown. Only set for idempotent tasks that are safe to restart from scratch. |
+| `eager` | `bool` | `False` | Dispatch via `asyncio.create_task` immediately when `add_task()` is called, before the response is sent. Per-call `eager` on `add_task()` overrides this value. |
+| `priority` | `int \| None` | `None` | Route through the priority queue instead of Starlette's background task list. Higher values run first. The conventional range is 1 (lowest) to 10 (highest). Per-call `priority` on `add_task()` overrides this value. |
 
 ### `schedule()`
 
@@ -203,3 +207,4 @@ See [Injection Patterns](../guide/injection.md) for the full comparison.
 | `_scheduler` | `SnapshotScheduler \| None` | Present if a backend was configured. |
 | `_audit_log` | `collections.deque` | In-memory ring buffer of the last 1000 `AuditEntry` records. Written on every retry and cancel action. |
 | `_running_tasks` | `dict[str, asyncio.Task]` | Maps `task_id` to the asyncio Task or Future currently executing that task. Populated when a task enters `RUNNING` state; removed on completion or cancellation. Used by `POST /tasks/{task_id}/cancel` to cancel running async tasks. |
+| `_priority_worker_task` | `asyncio.Task \| None` | The background coroutine that drains the priority queue and dispatches tasks in priority order. Started by `startup()` and cancelled by `shutdown()`. `None` before the first startup. |

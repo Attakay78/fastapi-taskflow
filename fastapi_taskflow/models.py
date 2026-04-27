@@ -42,6 +42,16 @@ class TaskConfig:
             at shutdown is saved as PENDING and re-dispatched on the next
             startup. Only set this on functions that are safe to run from
             scratch even if they partially completed (idempotent tasks).
+        eager: When ``True``, the task is dispatched via ``asyncio.create_task``
+            immediately when ``add_task()`` is called rather than waiting for
+            FastAPI to send the response. Per-call ``eager`` on ``add_task()``
+            overrides this value.
+        priority: Execution priority for the dedicated priority queue. ``None``
+            routes through the standard Starlette background task mechanism.
+            Any integer routes through the priority queue; higher values run
+            first. The conventional range is 1 (lowest) to 10 (highest) with
+            5 as the midpoint, but any integer is accepted. Per-call
+            ``priority`` on ``add_task()`` overrides this value.
     """
 
     retries: int = 0
@@ -50,6 +60,8 @@ class TaskConfig:
     persist: bool = False
     name: str | None = None
     requeue_on_interrupt: bool = False
+    eager: bool = False
+    priority: int | None = None
 
 
 @dataclass
@@ -87,6 +99,10 @@ class TaskRecord:
         source: Where this task came from. ``"manual"`` for tasks enqueued
             via ``add_task()``. ``"scheduled"`` for tasks fired by the
             periodic scheduler.
+        priority: Priority level assigned at enqueue time. ``None`` when the
+            task was routed through the standard Starlette mechanism (no
+            explicit priority). Any integer when routed through the priority
+            queue; higher values ran first.
     """
 
     task_id: str
@@ -105,6 +121,7 @@ class TaskRecord:
     tags: dict[str, str] = field(default_factory=dict)
     encrypted_payload: bytes | None = field(default=None)
     source: str = "manual"
+    priority: int | None = None
 
     @property
     def duration(self) -> float | None:
@@ -130,6 +147,7 @@ class TaskRecord:
             "stacktrace": self.stacktrace,
             "tags": dict(self.tags),
             "source": self.source,
+            "priority": self.priority,
         }
 
 

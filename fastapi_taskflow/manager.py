@@ -227,6 +227,15 @@ class TaskManager:
         self._audit_log: collections.deque = collections.deque(maxlen=1000)
         self._running_tasks: dict = {}
 
+        # Priority queue entries are (-priority, seq, task_id, wrapped_callable).
+        # Negating priority makes the min-heap return the highest priority first.
+        # The sequence number is a monotonically increasing tiebreaker so that
+        # tasks with equal priority execute in arrival order (FIFO), and the
+        # callable is never reached in a tuple comparison.
+        self._priority_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
+        self._priority_seq: int = 0
+        self._priority_worker_task: Optional[asyncio.Task] = None
+
         self._app: Optional["FastAPI"] = None
         self._scheduler = None
         self._periodic_scheduler: Optional["PeriodicScheduler"] = None
@@ -307,6 +316,9 @@ class TaskManager:
             self._periodic_scheduler.start()
         if self.logger is not None:
             await self.logger.startup()
+        self._priority_worker_task = asyncio.create_task(
+            self._run_priority_worker(), name="taskflow-priority-worker"
+        )
 
     async def shutdown(self) -> None:
         """Run all shutdown tasks for this manager.
@@ -331,6 +343,13 @@ class TaskManager:
                 yield
                 await task_manager.shutdown()
         """
+        if self._priority_worker_task is not None:
+            self._priority_worker_task.cancel()
+            try:
+                await self._priority_worker_task
+            except asyncio.CancelledError:
+                pass
+            self._priority_worker_task = None
         if self._periodic_scheduler is not None:
             self._periodic_scheduler.stop()
         if self._scheduler is not None:
@@ -342,6 +361,52 @@ class TaskManager:
             await self.logger.close()
         if self._sync_executor is not None:
             self._sync_executor.shutdown(wait=True)
+
+    # ------------------------------------------------------------------
+    # Priority queue
+    # ------------------------------------------------------------------
+
+    def enqueue_priority(self, task_id: str, priority: int, wrapped: Any) -> None:
+        """Push a wrapped task onto the priority queue.
+
+        Called by :class:`~fastapi_taskflow.wrapper.ManagedBackgroundTasks`
+        when ``add_task()`` is called with an explicit priority. The worker
+        coroutine drains the queue and dispatches tasks in descending priority
+        order, with FIFO ordering for tasks that share the same priority level.
+
+        Args:
+            task_id: ID of the already-created store record.
+            priority: Execution priority. Higher values run first.
+            wrapped: Zero-argument async callable produced by
+                :func:`~fastapi_taskflow.executor.make_background_func`.
+        """
+        self._priority_seq += 1
+        # Negate priority: PriorityQueue is a min-heap, so the lowest value
+        # is dequeued first. Negating makes the highest priority come out first.
+        self._priority_queue.put_nowait(
+            (-priority, self._priority_seq, task_id, wrapped)
+        )
+
+    async def _run_priority_worker(self) -> None:
+        """Drain the priority queue and dispatch tasks as asyncio Tasks.
+
+        Runs for the lifetime of the application. Each item pulled from the
+        queue is dispatched immediately via ``asyncio.create_task``; actual
+        concurrency is governed by the ``max_concurrent_tasks`` semaphore
+        inside :func:`~fastapi_taskflow.executor.execute_task`. Equal-priority
+        tasks are dispatched in arrival order (FIFO).
+
+        Cancelled cleanly by :meth:`shutdown`. Any items still in the queue
+        at shutdown remain as ``PENDING`` in the store and are handled by the
+        existing interrupted-task and requeue mechanisms.
+        """
+        while True:
+            try:
+                *_, wrapped = await self._priority_queue.get()
+                asyncio.create_task(wrapped())
+                self._priority_queue.task_done()
+            except asyncio.CancelledError:
+                break
 
     # ------------------------------------------------------------------
     # Decorator
@@ -356,6 +421,8 @@ class TaskManager:
         persist: bool = False,
         name: Optional[str] = None,
         requeue_on_interrupt: bool = False,
+        eager: bool = False,
+        priority: Optional[int] = None,
     ) -> Callable:
         """Register a function as a managed background task.
 
@@ -369,11 +436,24 @@ class TaskManager:
             backoff: Multiplier applied to *delay* on each retry (e.g. ``2.0``
                 for exponential backoff).
             name: Override the display name in logs and the dashboard.
+            persist: Save this task record to the backend for requeue on
+                restart. Equivalent to passing ``requeue_pending=True`` at the
+                :class:`~fastapi_taskflow.TaskManager` level but scoped to this
+                function only.
             requeue_on_interrupt: When ``True`` (and ``requeue_pending=True`` on
                 this ``TaskManager``), a task interrupted at shutdown is saved as
                 PENDING and re-dispatched on the next startup. Only use this for
                 idempotent functions -- those that are safe to run from scratch
                 even if they partially completed before the crash.
+            eager: When ``True``, dispatch via ``asyncio.create_task``
+                immediately when ``add_task()`` is called, before FastAPI sends
+                the response. Per-call ``eager`` on ``add_task()`` overrides
+                this value.
+            priority: Route this function through the priority queue instead of
+                Starlette's background task list. Higher values run first.
+                Conventional range is 1 (lowest) to 10 (highest). Per-call
+                ``priority`` on ``add_task()`` overrides this value. ``None``
+                uses the standard dispatch path (existing behaviour).
 
         Example::
 
@@ -390,6 +470,8 @@ class TaskManager:
                 persist=persist,
                 name=name or func.__name__,
                 requeue_on_interrupt=requeue_on_interrupt,
+                eager=eager,
+                priority=priority,
             )
             self.registry.register(func, config)
             return func

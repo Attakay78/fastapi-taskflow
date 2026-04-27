@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.7.0
+
+Adds priority queues, eager dispatch, and Dead Letter Queue bulk replay.
+
+### Priority queues
+
+- Added `priority` parameter to `@task_manager.task()` and `add_task()`. Tasks with a priority value bypass Starlette's background task list and enter a dedicated `asyncio.PriorityQueue` drained by a worker coroutine.
+- Higher values run first. Equal-priority tasks execute in arrival (FIFO) order. The conventional range is 1 (lowest) to 10 (highest); any integer is accepted.
+- Per-call `priority` on `add_task()` overrides the decorator-level default.
+- `TaskRecord.priority` records the priority at enqueue time. Shown in the dashboard task table and detail panel with a color-coded badge.
+
+### Eager dispatch
+
+- Added `eager` parameter to `@task_manager.task()` and `add_task()`. When `True`, the task is dispatched via `asyncio.create_task` the moment `add_task()` is called, before FastAPI sends the response.
+- Per-call `eager` on `add_task()` overrides the decorator-level default.
+
+### Dead Letter Queue bulk replay
+
+- Added `POST /tasks/bulk-retry`. Accepts a JSON body `{"task_ids": [...]}` and re-enqueues each listed task that is `failed` or `interrupted`. Tasks not found, not retryable, or whose function is no longer registered are counted in `skipped` without raising an error.
+- Added `POST /tasks/retry-failed`. Accepts a `since` query param (`<N>h`, `<N>d`, or `all`) and an optional `func_name` filter. Re-enqueues all matched failed tasks created within that window.
+- Both endpoints return `{dispatched, skipped, results}` and record a `bulk_retry` entry in the audit log.
+- Dead Letters tab toolbar: a time-window selector (1h, 6h, 24h, 7d, all) and a **Replay window** button. Clicking opens a confirmation modal before anything is dispatched.
+- Per-row checkboxes on Dead Letters rows. Checking one or more rows shows a bulk bar with a **Replay selected** button. Selection clears automatically after dispatch.
+
+---
+
 ## v0.6.1
 
 Fixed a bug where the distributed schedule lock was issued with a zero-second TTL for sub-second intervals, causing both instances to fire the same entry on every tick. The lock TTL now has a minimum of 1 second.

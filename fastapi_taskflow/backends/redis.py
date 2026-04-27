@@ -118,6 +118,7 @@ class RedisBackend(SnapshotBackend):
             if record.encrypted_payload
             else "",
             "source": record.source,
+            "priority": str(record.priority) if record.priority is not None else "",
         }
 
     @staticmethod
@@ -155,6 +156,7 @@ class RedisBackend(SnapshotBackend):
                 enc.encode() if (enc := mapping.get("encrypted_payload")) else None
             ),
             source=mapping.get("source") or "manual",
+            priority=int(p) if (p := mapping.get("priority")) else None,
         )
 
     # ------------------------------------------------------------------

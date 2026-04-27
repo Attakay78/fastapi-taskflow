@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
 
 from .auth import COOKIE_NAME, decode_token
 from .executor import make_background_func
@@ -19,6 +21,30 @@ _UNIT_MAP = {
 
 if TYPE_CHECKING:
     from .manager import TaskManager
+
+
+class _BulkRetryBody(BaseModel):
+    task_ids: list[str]
+
+
+def _parse_since(since: str) -> datetime | None:
+    """Parse a window string like '6h', '24h', '7d' into a cutoff datetime.
+
+    Returns None when *since* is 'all' (no cutoff).
+
+    Raises:
+        ValueError: If the format is not recognised.
+    """
+    if since == "all":
+        return None
+    m = re.match(r"^(\d+)(h|d)$", since)
+    if not m:
+        raise ValueError(
+            f"Invalid since value {since!r}. Use '<N>h', '<N>d', or 'all'."
+        )
+    amount, unit = int(m.group(1)), m.group(2)
+    delta = timedelta(hours=amount) if unit == "h" else timedelta(days=amount)
+    return datetime.now(timezone.utc) - delta
 
 
 def _actor(request: Request, secret_key: str | None) -> str:
@@ -100,6 +126,199 @@ def create_router(
             "success_rate": success / total if total > 0 else 0.0,
             "avg_duration_seconds": round(avg_duration, 6),
         }
+
+    @router.post("/bulk-retry", summary="Retry a specific set of failed tasks")
+    async def bulk_retry(body: _BulkRetryBody, request: Request) -> dict[str, Any]:
+        """Re-enqueue a list of failed or interrupted tasks by their task IDs.
+
+        Each task is retried with the same function, args, and kwargs as the
+        original. Tasks not found, already terminal with a non-retryable status,
+        or whose function is no longer registered are skipped (reported in
+        ``skipped``).
+
+        Args:
+            body: JSON body with a ``task_ids`` list of UUID strings.
+
+        Returns:
+            Dict with ``dispatched`` count, ``skipped`` count, and ``results``
+            list of ``{original_task_id, new_task_id}`` pairs.
+        """
+        scheduler = task_manager._scheduler
+        backend = scheduler._backend if scheduler is not None else None
+        on_success = scheduler.flush_one if scheduler is not None else None
+
+        all_records_map: dict[str, Any] | None = None
+
+        dispatched = 0
+        skipped = 0
+        results = []
+
+        for task_id in body.task_ids:
+            record = task_manager.store.get(task_id)
+            if record is None and task_manager._scheduler is not None:
+                if all_records_map is None:
+                    all_records = await task_manager.merged_list()
+                    all_records_map = {r.task_id: r for r in all_records}
+                record = all_records_map.get(task_id)
+
+            if record is None:
+                skipped += 1
+                continue
+            if record.status not in (TaskStatus.FAILED, TaskStatus.INTERRUPTED):
+                skipped += 1
+                continue
+
+            result = task_manager.registry.get_by_name(record.func_name)
+            if result is None:
+                skipped += 1
+                continue
+
+            func, config = result
+            new_task_id = str(uuid.uuid4())
+
+            task_manager.store.create(
+                new_task_id, func.__name__, record.args, record.kwargs, tags=record.tags
+            )
+
+            wrapped = make_background_func(
+                func,
+                new_task_id,
+                config,
+                task_manager.store,
+                record.args,
+                record.kwargs,
+                backend=backend,
+                on_success=on_success,
+                logger=task_manager.logger,
+                encryptor=task_manager.fernet,
+                semaphore=task_manager._task_semaphore,
+                sync_executor=task_manager._sync_executor,
+                running_tasks=task_manager._running_tasks,
+            )
+
+            asyncio.create_task(wrapped())
+            results.append({"original_task_id": task_id, "new_task_id": new_task_id})
+            dispatched += 1
+
+        task_manager._audit_log.append(
+            AuditEntry(
+                entry_id=str(uuid.uuid4()),
+                action="bulk_retry",
+                task_id="bulk",
+                actor=_actor(request, secret_key),
+                timestamp=datetime.now(timezone.utc),
+                detail={
+                    "dispatched": dispatched,
+                    "skipped": skipped,
+                    "task_ids": body.task_ids[:20],
+                },
+            )
+        )
+
+        return {"dispatched": dispatched, "skipped": skipped, "results": results}
+
+    @router.post("/retry-failed", summary="Retry all failed tasks within a time window")
+    async def retry_failed(
+        request: Request,
+        since: str = Query(
+            "6h",
+            description="Time window: '<N>h', '<N>d', or 'all'. Tasks whose "
+            "created_at is within this window are retried.",
+        ),
+        func_name: str | None = Query(
+            None, description="Limit replay to tasks with this function name."
+        ),
+    ) -> dict[str, Any]:
+        """Re-enqueue all failed tasks created within the given time window.
+
+        Args:
+            since: Window string parsed by :func:`_parse_since`.
+            func_name: Optional filter to replay only one function.
+
+        Returns:
+            Dict with ``dispatched``, ``skipped``, and ``results`` list.
+        """
+        try:
+            cutoff = _parse_since(since)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        all_records = await task_manager.merged_list()
+
+        def _aware(dt: datetime) -> datetime:
+            return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+        candidates = [
+            r
+            for r in all_records
+            if r.status in (TaskStatus.FAILED, TaskStatus.INTERRUPTED)
+            and (
+                cutoff is None
+                or (r.created_at is not None and _aware(r.created_at) >= cutoff)
+            )
+            and (func_name is None or r.func_name == func_name)
+        ]
+
+        scheduler = task_manager._scheduler
+        backend = scheduler._backend if scheduler is not None else None
+        on_success = scheduler.flush_one if scheduler is not None else None
+
+        dispatched = 0
+        skipped = 0
+        results = []
+
+        for record in candidates:
+            result = task_manager.registry.get_by_name(record.func_name)
+            if result is None:
+                skipped += 1
+                continue
+
+            func, config = result
+            new_task_id = str(uuid.uuid4())
+
+            task_manager.store.create(
+                new_task_id, func.__name__, record.args, record.kwargs, tags=record.tags
+            )
+
+            wrapped = make_background_func(
+                func,
+                new_task_id,
+                config,
+                task_manager.store,
+                record.args,
+                record.kwargs,
+                backend=backend,
+                on_success=on_success,
+                logger=task_manager.logger,
+                encryptor=task_manager.fernet,
+                semaphore=task_manager._task_semaphore,
+                sync_executor=task_manager._sync_executor,
+                running_tasks=task_manager._running_tasks,
+            )
+
+            asyncio.create_task(wrapped())
+            results.append(
+                {"original_task_id": record.task_id, "new_task_id": new_task_id}
+            )
+            dispatched += 1
+
+        task_manager._audit_log.append(
+            AuditEntry(
+                entry_id=str(uuid.uuid4()),
+                action="bulk_retry",
+                task_id="bulk",
+                actor=_actor(request, secret_key),
+                timestamp=datetime.now(timezone.utc),
+                detail={
+                    "since": since,
+                    "func_name": func_name,
+                    "dispatched": dispatched,
+                    "skipped": skipped,
+                },
+            )
+        )
+
+        return {"dispatched": dispatched, "skipped": skipped, "results": results}
 
     @router.get("/{task_id}", summary="Get a single task by ID")
     async def get_task(task_id: str) -> dict[str, Any]:

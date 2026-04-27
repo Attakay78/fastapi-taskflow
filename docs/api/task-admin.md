@@ -167,6 +167,8 @@ Relative to `path` (default `/tasks`):
 | `GET` | `/tasks/{task_id}` | Single task detail |
 | `POST` | `/tasks/{task_id}/retry` | Retry a failed or interrupted task |
 | `POST` | `/tasks/{task_id}/cancel` | Cancel a pending or running task |
+| `POST` | `/tasks/bulk-retry` | Retry a specific list of tasks by ID |
+| `POST` | `/tasks/retry-failed` | Retry all failed tasks within a time window |
 | `DELETE` | `/tasks/history` | Delete completed task history older than a time window |
 | `GET` | `/tasks/dashboard` | HTML dashboard |
 | `GET` | `/tasks/dashboard/stream` | SSE stream (unauthenticated) |

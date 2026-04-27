@@ -1,3 +1,4 @@
+import asyncio
 import contextvars
 import pickle
 import uuid
@@ -59,6 +60,8 @@ class ManagedBackgroundTasks(BackgroundTasks):
         *args: Any,
         idempotency_key: Optional[str] = None,
         tags: Optional[dict[str, str]] = None,
+        eager: Optional[bool] = None,
+        priority: Optional[int] = None,
         **kwargs: Any,
     ) -> str:
         """Enqueue *func* as a managed background task and return its ``task_id``.
@@ -77,6 +80,14 @@ class ManagedBackgroundTasks(BackgroundTasks):
                 every :class:`~fastapi_taskflow.loggers.LogEvent` and
                 :class:`~fastapi_taskflow.loggers.LifecycleEvent` emitted for this
                 task, allowing observers to slice metrics or logs by label.
+            eager: When ``True``, dispatch via ``asyncio.create_task`` immediately
+                rather than waiting for the response to be sent. Overrides the
+                decorator-level ``eager`` setting for this call only.
+            priority: Execution priority. Higher values run before lower ones.
+                Routes the task through the dedicated priority queue instead of
+                Starlette's background task list. Overrides the decorator-level
+                ``priority`` setting for this call only. The conventional range is
+                1 (lowest) to 10 (highest); any integer is accepted.
             **kwargs: Keyword arguments forwarded to *func*.
 
         Returns:
@@ -90,6 +101,12 @@ class ManagedBackgroundTasks(BackgroundTasks):
 
         task_id = str(uuid.uuid4())
         config = self._task_manager.registry.get_config(func) or TaskConfig()
+
+        # Per-call overrides take precedence over decorator-level defaults.
+        run_priority: Optional[int] = (
+            priority if priority is not None else config.priority
+        )
+        run_eager: bool = eager if eager is not None else config.eager
 
         # Capture the caller's contextvars context for trace context propagation.
         # This snapshot is taken here (in the request handler) so OTel spans and
@@ -115,6 +132,7 @@ class ManagedBackgroundTasks(BackgroundTasks):
             idempotency_key=idempotency_key,
             tags=tags,
             encrypted_payload=encrypted_payload,
+            priority=run_priority,
         )
 
         scheduler = self._task_manager._scheduler
@@ -138,5 +156,15 @@ class ManagedBackgroundTasks(BackgroundTasks):
             running_tasks=self._task_manager._running_tasks,
         )
 
-        super().add_task(wrapped)  # appends to self.tasks (shared with native if set)
+        if run_priority is not None:
+            # Priority queue: the worker coroutine dispatches tasks in priority
+            # order. Eager is ignored when priority is set — the queue provides
+            # its own non-blocking dispatch path.
+            self._task_manager.enqueue_priority(task_id, run_priority, wrapped)
+        elif run_eager:
+            asyncio.create_task(wrapped())
+        else:
+            super().add_task(
+                wrapped
+            )  # appends to self.tasks (shared with native if set)
         return task_id

@@ -36,7 +36,7 @@ TaskAdmin(app, task_manager, path="/admin/tasks")
 - Pause live updates, buffers incoming SSE events and shows a new-task count
 - Bulk retry: select multiple failed or interrupted tasks and retry them in one click
 - Cancel button on pending tasks in the detail panel
-- Dead Letters tab showing only failed tasks
+- Dead Letters tab showing only failed tasks with bulk replay controls
 - Audit tab showing a log of retry and cancel actions, visible when auth is configured
 
 ## Tabs
@@ -47,7 +47,13 @@ The live task table. Shows all task runs with their status, duration, retries, a
 
 ### Dead Letters
 
-Shows only tasks with status `failed`, sorted newest first. Useful for reviewing failures without filtering the main table. The tab badge shows the current failed count.
+Shows only tasks with status `failed`, sorted newest first. The tab badge shows the current failed count.
+
+**Time-window replay.** A toolbar above the table lets you pick a window (last 1 hour, 6 hours, 24 hours, 7 days, or all time) and click **Replay window**. A confirmation modal summarises what will run before anything is dispatched. Each matched task is re-enqueued with its original function, args, and kwargs. The result is reported as a toast.
+
+**Selective replay.** Each row has a checkbox. Checking one or more rows shows a bulk bar with a **Replay selected** button that re-enqueues only the checked tasks. The selection is cleared automatically after dispatch.
+
+Both replay actions are recorded in the audit log with action type `bulk_retry`.
 
 ### Schedules
 
@@ -133,6 +139,50 @@ Response:
 
 The retry will fail with `409` if the function is no longer registered in the current process.
 
+### Bulk retry
+
+Retry a specific set of tasks by ID:
+
+```bash
+curl -X POST http://localhost:8000/tasks/bulk-retry \
+  -H "Content-Type: application/json" \
+  -d '{"task_ids": ["uuid-1", "uuid-2"]}'
+```
+
+Response:
+
+```json
+{
+  "dispatched": 2,
+  "skipped": 0,
+  "results": [
+    {"original_task_id": "uuid-1", "new_task_id": "new-uuid-1"},
+    {"original_task_id": "uuid-2", "new_task_id": "new-uuid-2"}
+  ]
+}
+```
+
+Tasks that are not found, not in a retryable status, or whose function is no longer registered are counted in `skipped` and do not produce an error.
+
+### Replay by time window
+
+Retry all failed tasks created within a time window:
+
+```bash
+# Last 6 hours
+curl -X POST "http://localhost:8000/tasks/retry-failed?since=6h"
+
+# Last 7 days, one function only
+curl -X POST "http://localhost:8000/tasks/retry-failed?since=7d&func_name=send_email"
+
+# All time
+curl -X POST "http://localhost:8000/tasks/retry-failed?since=all"
+```
+
+The `since` parameter accepts `<N>h` (hours), `<N>d` (days), or `all`. The optional `func_name` parameter limits replay to one function. The response has the same shape as `/bulk-retry`.
+
+Both bulk endpoints record a `bulk_retry` entry in the audit log.
+
 ## Audit log
 
 Every retry and cancel action is recorded with the timestamp, actor username, and the affected task ID. The last 1000 entries are kept in memory.
@@ -162,9 +212,19 @@ Response:
     "actor": "bob",
     "timestamp": "2024-01-15T10:28:00Z",
     "detail": {"new_task_id": "..."}
+  },
+  {
+    "entry_id": "...",
+    "action": "bulk_retry",
+    "task_id": "bulk",
+    "actor": "alice",
+    "timestamp": "2024-01-15T10:25:00Z",
+    "detail": {"since": "6h", "dispatched": 4, "skipped": 1}
   }
 ]
 ```
+
+Action types: `retry`, `cancel`, `bulk_retry`. Bulk retry entries use `"task_id": "bulk"` and record the window or task IDs along with the dispatched and skipped counts in `detail`.
 
 When auth is not configured, `actor` is always `"anonymous"`. The Audit tab in the dashboard is only shown when `auth` is configured.
 
@@ -230,6 +290,8 @@ All routes are relative to the `path` you configure (default `/tasks`).
 | `GET` | `/tasks/{task_id}` | JSON single task detail |
 | `POST` | `/tasks/{task_id}/retry` | Retry a failed or interrupted task |
 | `POST` | `/tasks/{task_id}/cancel` | Cancel a pending task |
+| `POST` | `/tasks/bulk-retry` | Retry a specific list of tasks by ID |
+| `POST` | `/tasks/retry-failed` | Retry all failed tasks within a time window |
 | `DELETE` | `/tasks/history` | Delete completed tasks older than a time window |
 | `GET` | `/tasks/dashboard` | HTML dashboard |
 | `GET` | `/tasks/dashboard/stream` | SSE event stream |

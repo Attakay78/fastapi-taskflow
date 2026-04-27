@@ -43,6 +43,8 @@ fastapi-taskflow is a thin layer on top of what you already have. It does not co
 - Argument encryption: Fernet-based at-rest encryption for task args and kwargs
 - Trace context propagation: OpenTelemetry spans flow from the request into background execution (Python 3.11+)
 - Concurrency controls: opt-in semaphore for async tasks and dedicated thread pool for sync tasks
+- Priority queues: `priority=` on `@task_manager.task()` or `add_task()` — higher-priority tasks run first, equal-priority tasks are FIFO
+- Eager dispatch: `eager=True` starts a task immediately via `asyncio.create_task` before the HTTP response is sent
 - Scheduled tasks: `@task_manager.schedule(every=)` and `cron=` with distributed lock for multi-instance
 - Zero-migration injection: keep your existing `BackgroundTasks` annotations
 - Both sync and async task functions supported
@@ -139,6 +141,8 @@ def route(tasks=Depends(task_manager.get_tasks)):
 | `persist` | `bool` | `False` | Save this task for requeue on restart |
 | `name` | `str` | function name | Override the name shown in the dashboard |
 | `requeue_on_interrupt` | `bool` | `False` | Requeue this task if it was mid-execution at shutdown. Only set for idempotent tasks. |
+| `eager` | `bool` | `False` | Start the task via `asyncio.create_task` immediately when `add_task()` is called, before the response is sent. Per-call `eager` on `add_task()` overrides this. |
+| `priority` | `int \| None` | `None` | Route through the priority queue. Higher integers run first. Conventional range 1 (lowest) to 10 (highest). Per-call `priority` on `add_task()` overrides this. |
 
 ## Idempotency keys
 
@@ -277,6 +281,54 @@ task_manager = TaskManager(
 ```
 
 Both default to `None`. When not set, execution is identical to previous versions.
+
+## Priority queues
+
+Pass `priority=` to control execution order. Higher-priority tasks run before lower-priority ones regardless of arrival order. Equal-priority tasks execute in arrival (FIFO) order.
+
+```python
+@task_manager.task(retries=2, priority=9)
+async def send_otp(phone: str) -> None:
+    ...
+
+@task_manager.task(priority=1)
+def generate_report(user_id: int) -> None:
+    ...
+
+@app.post("/otp")
+async def otp(phone: str, tasks=Depends(task_manager.get_tasks)):
+    # Runs before the report even if the report was queued first.
+    task_id = tasks.add_task(send_otp, phone)
+    return {"task_id": task_id}
+```
+
+Set `priority=` at the decorator level as a default, then override it per call:
+
+```python
+task_id = tasks.add_task(process_item, item_id, priority=10)  # rush job
+task_id = tasks.add_task(process_item, item_id, priority=1)   # defer
+task_id = tasks.add_task(process_item, item_id)               # use decorator default
+```
+
+Tasks with no priority route through Starlette's normal background task list unchanged.
+
+## Eager dispatch
+
+Set `eager=True` to start a task via `asyncio.create_task` the moment `add_task()` is called, before FastAPI sends the response. The task is tracked and retried exactly like a normal task.
+
+```python
+@task_manager.task(eager=True)
+async def notify_user(user_id: int, body: str) -> None:
+    await push_service.send(user_id, body)
+
+@app.post("/action")
+async def action(user_id: int, tasks=Depends(task_manager.get_tasks)):
+    task_id = tasks.add_task(notify_user, user_id, "Your request is processing")
+    # notify_user is already running here, before the response goes out.
+    return {"task_id": task_id}
+```
+
+Override per call with `tasks.add_task(func, arg, eager=True)`. When `priority=` is also set, the priority queue governs dispatch and `eager` is ignored.
 
 ## Scheduled tasks
 

@@ -97,6 +97,7 @@ class TaskStore:
         tags: Optional[dict] = None,
         encrypted_payload: Optional[bytes] = None,
         source: str = "manual",
+        priority: Optional[int] = None,
     ) -> TaskRecord:
         """Create a new ``PENDING`` record and add it to the store.
 
@@ -113,6 +114,8 @@ class TaskStore:
             encrypted_payload: Optional Fernet-encrypted args blob.
             source: Origin of the task. ``"manual"`` for route-enqueued
                 tasks, ``"scheduled"`` for periodic scheduler fires.
+            priority: Priority level for the task. ``None`` when not using
+                the priority queue. Higher integers run first.
         """
         record = TaskRecord(
             task_id=task_id,
@@ -124,6 +127,7 @@ class TaskStore:
             tags=tags or {},
             encrypted_payload=encrypted_payload,
             source=source,
+            priority=priority,
         )
         with self._lock:
             self._tasks[task_id] = record

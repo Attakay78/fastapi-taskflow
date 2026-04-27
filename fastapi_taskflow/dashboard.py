@@ -656,6 +656,11 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
     .td--check { vertical-align: middle; }
     input.row-check { cursor: pointer; accent-color: #3b82f6; width: 14px; height: 14px; }
 
+    /* ── DLQ toolbar ────────────────────────────────────────── */
+    .dlq-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+    .dlq-label { font-size: 13px; color: var(--db-text-2); }
+    .dlq-select { font-size: 13px; padding: 4px 8px; border-radius: 5px; border: 1px solid var(--db-border); background: var(--db-surface-2); color: var(--db-text); cursor: pointer; }
+
     /* ── Tab bar (segmented control) ────────────────────────── */
     .tab-bar { display: inline-flex; gap: 2px; margin-bottom: 16px; background: var(--db-surface-3); border: 1px solid var(--db-border); border-radius: 9px; padding: 3px; }
     .tab-btn { background: none; border: none; border-radius: 7px; padding: 5px 14px; font-size: 12.5px; font-weight: 500; color: var(--db-text-muted); cursor: pointer; transition: color .15s, background .15s, box-shadow .15s; white-space: nowrap; }
@@ -801,14 +806,15 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
           <th class="th" data-sort="task_id" onclick="setSort('task_id')">ID <span class="sort-icon">&#8661;</span></th>
           <th class="th" data-sort="func_name" onclick="setSort('func_name')">Function <span class="sort-icon">&#8661;</span></th>
           <th class="th" data-sort="status" onclick="setSort('status')">Status <span class="sort-icon">&#8661;</span></th>
-          <th class="th th--r" data-sort="duration" onclick="setSort('duration')">Duration <span class="sort-icon">&#8661;</span></th>
-          <th class="th th--r" data-sort="retries_used" onclick="setSort('retries_used')">Retries <span class="sort-icon">&#8661;</span></th>
+          <th class="th" data-sort="duration" onclick="setSort('duration')">Duration <span class="sort-icon">&#8661;</span></th>
+          <th class="th" data-sort="retries_used" onclick="setSort('retries_used')">Retries <span class="sort-icon">&#8661;</span></th>
           <th class="th" data-sort="created_at" onclick="setSort('created_at')">Created <span class="sort-icon">&#8595;</span></th>
+          <th class="th" data-sort="priority" onclick="setSort('priority')">Priority <span class="sort-icon">&#8661;</span></th>
           <th class="th">Error</th>
         </tr>
       </thead>
       <tbody id="tasks-tbody">
-        <tr><td colspan="8" class="empty">Connecting&#8230;</td></tr>
+        <tr><td colspan="9" class="empty">Connecting&#8230;</td></tr>
       </tbody>
     </table>
   </div>
@@ -818,14 +824,36 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
 
   <!-- Dead Letters panel -->
   <div id="panel-deadletters" style="display:none">
+
+    <!-- Toolbar: time-window replay -->
+    <div class="dlq-toolbar">
+      <span class="dlq-label">Replay window:</span>
+      <select id="dlq-window-select" class="dlq-select">
+        <option value="1h">Last 1 hour</option>
+        <option value="6h" selected>Last 6 hours</option>
+        <option value="24h">Last 24 hours</option>
+        <option value="7d">Last 7 days</option>
+        <option value="all">All time</option>
+      </select>
+      <button class="bulk-btn" onclick="dlqReplayWindow()">Replay window</button>
+    </div>
+
+    <!-- Bulk bar: shown when rows are checked -->
+    <div class="bulk-bar" id="dlq-bulk-bar">
+      <span id="dlq-bulk-label">0 tasks selected</span>
+      <button class="bulk-btn" onclick="dlqReplaySelected()">Replay selected</button>
+      <button class="bulk-btn bulk-btn--cancel" onclick="dlqClearSelection()">Clear</button>
+    </div>
+
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
+            <th class="th th--check"><input type="checkbox" class="row-check" id="dlq-select-all" onclick="dlqToggleAll(this)" title="Select all"></th>
             <th class="th">ID</th>
             <th class="th">Function</th>
             <th class="th">Status</th>
-            <th class="th th--r">Duration</th>
+            <th class="th">Duration</th>
             <th class="th">Created</th>
             <th class="th">Error</th>
           </tr>
@@ -896,6 +924,18 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
     <div class="popup-actions">
       <button class="popup-btn popup-btn--cancel" onclick="clearTimeFilter()">Clear filter</button>
       <button class="popup-btn popup-btn--primary" onclick="applyTimeFilter()">Apply</button>
+    </div>
+  </div>
+</div>
+
+<!-- DLQ replay window confirmation popup -->
+<div class="popup-backdrop" id="dlq-replay-popup" onclick="closeDlqReplayPopup(event)">
+  <div class="popup" onclick="event.stopPropagation()">
+    <div class="popup-title">Replay failed tasks</div>
+    <div class="popup-desc" id="dlq-replay-popup-desc">Re-enqueue all failed tasks in the selected window. Each task will run again with its original arguments.</div>
+    <div class="popup-actions">
+      <button class="popup-btn popup-btn--cancel" onclick="closeDlqReplayPopup()">Cancel</button>
+      <button class="popup-btn popup-btn--primary" id="dlq-replay-confirm-btn" onclick="confirmDlqReplayWindow()">Replay</button>
     </div>
   </div>
 </div>
@@ -1300,9 +1340,10 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
         + '</td>'
         + '<td class="td td--func">' + esc(t.func_name) + (t.source === 'scheduled' ? ' <span class="source-badge">scheduled</span>' : '') + '</td>'
         + '<td class="td">'           + badge(t.status) + '</td>'
-        + '<td class="td td--r">'     + dur + '</td>'
-        + '<td class="td td--r">'     + t.retries_used + '</td>'
+        + '<td class="td">'     + dur + '</td>'
+        + '<td class="td">'     + t.retries_used + '</td>'
         + '<td class="td td--date">'  + date + '</td>'
+        + '<td class="td">'     + (t.priority != null ? priorityBadge(t.priority) : '<span class="muted">—</span>') + '</td>'
         + '<td class="td td--err">'   + err + '</td>'
         + '</tr>';
     }).join('');
@@ -1336,6 +1377,13 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
     return '<span class="badge ' + (cls[status] || 'badge--pending') + '">' + esc(status) + '</span>';
   }
 
+  function priorityBadge(p) {
+    // Color scale: high priority (>=8) teal, medium (5-7) amber, low (<=4) gray.
+    var bg = p >= 8 ? 'rgba(0,150,136,.12)' : p >= 5 ? 'rgba(245,158,11,.12)' : 'rgba(107,114,128,.1)';
+    var fg = p >= 8 ? '#009688' : p >= 5 ? '#b45309' : '#6b7280';
+    return '<span style="background:' + bg + ';color:' + fg + ';padding:1px 7px;border-radius:4px;font-size:11px;font-weight:600;font-variant-numeric:tabular-nums">' + p + '</span>';
+  }
+
   function showToast(msg) {
     var t = document.getElementById('toast');
     t.textContent = msg;
@@ -1350,7 +1398,7 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
       sortDir = sortDir === 'asc' ? 'desc' : 'asc';
     } else {
       sortCol = col;
-      sortDir = (col === 'created_at' || col === 'duration') ? 'desc' : 'asc';
+      sortDir = (col === 'created_at' || col === 'duration' || col === 'priority') ? 'desc' : 'asc';
     }
     localStorage.setItem('tf-sort-col', sortCol);
     localStorage.setItem('tf-sort-dir', sortDir);
@@ -1483,9 +1531,10 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
       + dSec('Ended',   '<span style="font-size:12px">' + ended   + '</span>')
       + '</div>'
 
-      + '<div class="d-row2">'
+      + '<div class="d-row3">'
       + dSec('Duration',     '<span class="d-val">' + dur + '</span>')
       + dSec('Retries Used', '<span class="d-val">' + task.retries_used + '</span>')
+      + dSec('Priority', task.priority != null ? priorityBadge(task.priority) : '<span class="d-val muted">—</span>')
       + '</div>'
 
       + (SHOW_ARGS && ((task.args && task.args.length) || (task.kwargs && Object.keys(task.kwargs).length)) ?
@@ -1776,6 +1825,8 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
       if (t.backoff !== 1.0 && t.delay > 0) pills.push(rtaskPill(t.backoff + 'x backoff', false));
       if (t.persist) pills.push(rtaskPill('persist', true));
       if (t.requeue_on_interrupt) pills.push(rtaskPill('requeue', true));
+      if (t.eager) pills.push(rtaskPill('eager', true));
+      if (t.priority != null) pills.push(rtaskPill('priority ' + t.priority, true));
       return '<div class="rtask-card">'
         + '<div class="rtask-name">' + esc(t.name) + '</div>'
         + '<div class="rtask-pills">' + pills.join('') + '</div>'
@@ -1790,6 +1841,93 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
 
 
   // ── Dead Letters ───────────────────────────────────────────────
+  var dlqSelected = new Set();
+
+  function dlqToggleRow(id, cb, evt) {
+    evt && evt.stopPropagation();
+    if (cb.checked) dlqSelected.add(id);
+    else dlqSelected.delete(id);
+    dlqUpdateBar();
+  }
+
+  function dlqToggleAll(cb) {
+    document.querySelectorAll('.dlq-row-check').forEach(function(c) {
+      c.checked = cb.checked;
+      var id = c.dataset.id;
+      if (cb.checked) dlqSelected.add(id);
+      else dlqSelected.delete(id);
+    });
+    dlqUpdateBar();
+  }
+
+  function dlqUpdateBar() {
+    var bar   = document.getElementById('dlq-bulk-bar');
+    var label = document.getElementById('dlq-bulk-label');
+    if (!bar) return;
+    if (dlqSelected.size > 0) {
+      bar.classList.add('bulk-bar--on');
+      label.textContent = dlqSelected.size + (dlqSelected.size === 1 ? ' task selected' : ' tasks selected');
+    } else {
+      bar.classList.remove('bulk-bar--on');
+    }
+  }
+
+  function dlqClearSelection() {
+    dlqSelected.clear();
+    document.querySelectorAll('.dlq-row-check').forEach(function(c) { c.checked = false; });
+    var all = document.getElementById('dlq-select-all');
+    if (all) all.checked = false;
+    dlqUpdateBar();
+  }
+
+  function dlqReplaySelected() {
+    var ids = Array.from(dlqSelected);
+    if (!ids.length) return;
+    fetch(TASKS_PREFIX + '/bulk-retry', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({task_ids: ids})
+    }).then(function(r) {
+      return r.json().then(function(data) {
+        if (!r.ok) { showToast('Replay failed: ' + (data.detail || 'unknown error')); return; }
+        dlqClearSelection();
+        showToast('Replayed ' + data.dispatched + ' task(s)' + (data.skipped ? ', ' + data.skipped + ' skipped' : ''));
+      });
+    }).catch(function(e) { showToast('Network error'); });
+  }
+
+  function dlqReplayWindow() {
+    var since = document.getElementById('dlq-window-select').value;
+    var labels = {'1h':'last 1 hour','6h':'last 6 hours','24h':'last 24 hours','7d':'last 7 days','all':'all time'};
+    var desc = document.getElementById('dlq-replay-popup-desc');
+    if (desc) desc.textContent = 'Re-enqueue all failed tasks from the ' + (labels[since] || since) + '. Each task will run again with its original arguments.';
+    document.getElementById('dlq-replay-popup').classList.add('popup-backdrop--open');
+  }
+
+  function closeDlqReplayPopup(e) {
+    if (e && e.target !== document.getElementById('dlq-replay-popup')) return;
+    document.getElementById('dlq-replay-popup').classList.remove('popup-backdrop--open');
+  }
+
+  function confirmDlqReplayWindow() {
+    var since = document.getElementById('dlq-window-select').value;
+    var btn = document.getElementById('dlq-replay-confirm-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Replaying…'; }
+    document.getElementById('dlq-replay-popup').classList.remove('popup-backdrop--open');
+    fetch(TASKS_PREFIX + '/retry-failed?since=' + encodeURIComponent(since), {
+      method: 'POST'
+    }).then(function(r) {
+      return r.json().then(function(data) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Replay'; }
+        if (!r.ok) { showToast('Replay failed: ' + (data.detail || 'unknown error')); return; }
+        showToast('Replayed ' + data.dispatched + ' task(s)' + (data.skipped ? ', ' + data.skipped + ' skipped' : ''));
+      });
+    }).catch(function(e) {
+      if (btn) { btn.disabled = false; btn.textContent = 'Replay'; }
+      showToast('Network error');
+    });
+  }
+
   function renderDeadLetters() {
     var tbody = document.getElementById('deadletters-tbody');
     var cnt   = document.getElementById('tab-deadletters-count');
@@ -1797,8 +1935,10 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
     var failed = state.tasks.filter(function(t) { return t.status === 'failed'; });
     failed.sort(function(a, b) { return (b.created_at || '').localeCompare(a.created_at || ''); });
     if (cnt) cnt.textContent = failed.length > 0 ? failed.length : '';
+    dlqSelected.clear();
+    dlqUpdateBar();
     if (!failed.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty">No failed tasks.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">No failed tasks.</td></tr>';
       return;
     }
     tbody.innerHTML = failed.map(function(t) {
@@ -1807,11 +1947,16 @@ _DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
       var err  = t.error
         ? '<span class="err-text" title="' + esc(t.error) + '">' + esc(t.error.slice(0,60)) + (t.error.length > 60 ? '\u2026' : '') + '</span>'
         : '<span class="muted">\u2014</span>';
+      var chk  = '<td class="td td--check" onclick="event.stopPropagation()">'
+        + '<input type="checkbox" class="row-check dlq-row-check" data-id="' + esc(t.task_id) + '"'
+        + ' onclick="dlqToggleRow(\'' + esc(t.task_id) + '\', this, event)">'
+        + '</td>';
       return '<tr class="row" onclick="openDetail(this.dataset.id)" data-id="' + esc(t.task_id) + '">'
+        + chk
         + '<td class="td td--mono">' + esc(t.task_id.slice(0,8)) + '\u2026</td>'
         + '<td class="td td--func">' + esc(t.func_name) + '</td>'
         + '<td class="td">'           + badge(t.status) + '</td>'
-        + '<td class="td td--r">'     + dur + '</td>'
+        + '<td class="td">'           + dur + '</td>'
         + '<td class="td td--date">'  + date + '</td>'
         + '<td class="td td--err">'   + err + '</td>'
         + '</tr>';
@@ -1948,6 +2093,8 @@ def _serialize_registry(registry) -> str:
                 "backoff": config.backoff,
                 "persist": config.persist,
                 "requeue_on_interrupt": config.requeue_on_interrupt,
+                "eager": config.eager,
+                "priority": config.priority,
             }
         )
     result.sort(key=lambda x: x["name"])

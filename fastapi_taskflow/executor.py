@@ -175,6 +175,10 @@ async def execute_task(
             default ``asyncio`` thread pool, preventing task bursts from
             exhausting threads needed by sync request handlers. Corresponds to
             ``max_sync_threads`` on :class:`~fastapi_taskflow.TaskManager`.
+        running_tasks: Shared dict mapping ``task_id`` to the asyncio Task or
+            Future currently executing that function. Populated when the task
+            enters ``RUNNING`` and removed on completion or cancellation. Used
+            by ``POST /tasks/{task_id}/cancel`` to cancel running async tasks.
     """
     # The semaphore caps concurrent async task execution only. Sync tasks run
     # in a ThreadPoolExecutor whose max_workers already limits concurrency
@@ -522,6 +526,9 @@ def make_background_func(
             concurrent async task execution.
         sync_executor: Optional thread pool forwarded to :func:`execute_task`
             to isolate sync task threads from the default asyncio pool.
+        running_tasks: Shared dict forwarded to :func:`execute_task` so the
+            executor can register and deregister the inner task handle for
+            cancellation support.
 
     Returns:
         A zero-argument async callable named ``_bg_{func_name}_{task_id[:8]}``.

@@ -17,7 +17,7 @@ When constructed via a dependency or `install()`, FastAPI passes its native `Bac
 
 ## Methods
 
-### `add_task(func, *args, idempotency_key=None, tags=None, **kwargs) -> str`
+### `add_task(func, *args, idempotency_key=None, tags=None, eager=None, priority=None, **kwargs) -> str`
 
 Enqueues a function as a managed background task. Returns the `task_id` UUID string.
 
@@ -25,6 +25,12 @@ This overrides `BackgroundTasks.add_task` which returns `None`. If you are captu
 
 ```python
 task_id = background_tasks.add_task(send_email, address=email)
+
+# With priority
+task_id = background_tasks.add_task(send_otp, phone, priority=9)
+
+# Eager dispatch (starts immediately, before response is sent)
+task_id = background_tasks.add_task(notify, user_id, eager=True)
 ```
 
 **Parameters:**
@@ -35,6 +41,8 @@ task_id = background_tasks.add_task(send_email, address=email)
 | `*args` | | | Positional arguments forwarded to `func`. |
 | `idempotency_key` | `str \| None` | `None` | Deduplication key. If a non-failed task with the same key already exists, its `task_id` is returned and `func` is not enqueued again. |
 | `tags` | `dict[str, str] \| None` | `None` | Key/value labels attached to this task. Forwarded to every `LogEvent` and `LifecycleEvent`. |
+| `eager` | `bool \| None` | `None` | When `True`, dispatch via `asyncio.create_task` immediately rather than waiting for the response to be sent. Overrides the decorator-level `eager` setting for this call only. |
+| `priority` | `int \| None` | `None` | Route through the priority queue. Higher values run first. Conventional range 1-10. Overrides the decorator-level `priority` for this call only. Mutually exclusive with `eager` — when priority is set, `eager` is ignored. |
 | `**kwargs` | | | Keyword arguments forwarded to `func`. |
 
 ## Direct construction

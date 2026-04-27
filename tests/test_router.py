@@ -250,3 +250,131 @@ def test_delete_history_skips_live_tasks():
     assert resp.status_code == 200
     assert resp.json()["deleted"] == 0
     assert tm.store.get("live1") is not None
+
+
+# ---------------------------------------------------------------------------
+# POST /tasks/bulk-retry
+# ---------------------------------------------------------------------------
+
+
+def test_bulk_retry_selected_tasks():
+    from fastapi_taskflow.models import TaskStatus
+
+    app, tm = _build_app()
+    tm.store.create("b1", "dummy", (1,), {})
+    tm.store.update("b1", status=TaskStatus.FAILED, error="err")
+    tm.store.create("b2", "dummy", (2,), {})
+    tm.store.update("b2", status=TaskStatus.FAILED, error="err")
+
+    with TestClient(app) as client:
+        resp = client.post("/tasks/bulk-retry", json={"task_ids": ["b1", "b2"]})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["dispatched"] == 2
+    assert data["skipped"] == 0
+    assert len(data["results"]) == 2
+
+
+def test_bulk_retry_skips_non_failed():
+    from fastapi_taskflow.models import TaskStatus
+
+    app, tm = _build_app()
+    tm.store.create("b3", "dummy", (1,), {})
+    tm.store.update("b3", status=TaskStatus.SUCCESS)
+    tm.store.create("b4", "dummy", (2,), {})
+    tm.store.update("b4", status=TaskStatus.FAILED, error="err")
+
+    with TestClient(app) as client:
+        resp = client.post("/tasks/bulk-retry", json={"task_ids": ["b3", "b4"]})
+
+    data = resp.json()
+    assert data["dispatched"] == 1
+    assert data["skipped"] == 1
+
+
+def test_bulk_retry_skips_unknown_ids():
+    app, _ = _build_app()
+    with TestClient(app) as client:
+        resp = client.post("/tasks/bulk-retry", json={"task_ids": ["no-such-id"]})
+
+    data = resp.json()
+    assert data["dispatched"] == 0
+    assert data["skipped"] == 1
+
+
+def test_bulk_retry_empty_body():
+    app, _ = _build_app()
+    with TestClient(app) as client:
+        resp = client.post("/tasks/bulk-retry", json={"task_ids": []})
+
+    data = resp.json()
+    assert data["dispatched"] == 0
+    assert data["skipped"] == 0
+
+
+# ---------------------------------------------------------------------------
+# POST /tasks/retry-failed
+# ---------------------------------------------------------------------------
+
+
+def test_retry_failed_window_replays_in_window():
+    from fastapi_taskflow.models import TaskStatus
+
+    app, tm = _build_app()
+    tm.store.create("w1", "dummy", (1,), {})
+    tm.store.update("w1", status=TaskStatus.FAILED, error="err")
+
+    with TestClient(app) as client:
+        resp = client.post("/tasks/retry-failed?since=1h")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["dispatched"] == 1
+
+
+def test_retry_failed_window_invalid_since():
+    app, _ = _build_app()
+    with TestClient(app) as client:
+        resp = client.post("/tasks/retry-failed?since=bad")
+
+    assert resp.status_code == 400
+
+
+def test_retry_failed_window_func_name_filter():
+    from fastapi_taskflow.models import TaskStatus
+
+    app, tm = _build_app()
+    tm.store.create("w2", "dummy", (1,), {})
+    tm.store.update("w2", status=TaskStatus.FAILED, error="err")
+    tm.store.create("w3", "other_func", (1,), {})
+    tm.store.update("w3", status=TaskStatus.FAILED, error="err")
+
+    with TestClient(app) as client:
+        resp = client.post("/tasks/retry-failed?since=1h&func_name=dummy")
+
+    data = resp.json()
+    assert data["dispatched"] == 1
+    assert data["skipped"] == 0
+
+
+def test_retry_failed_window_all():
+    from fastapi_taskflow.models import TaskStatus
+    from datetime import datetime, timedelta, timezone
+
+    app, tm = _build_app()
+    old_time = datetime.now(timezone.utc) - timedelta(days=30)
+    tm.store.create("w4", "dummy", (1,), {})
+    tm.store.update("w4", status=TaskStatus.FAILED, error="err", end_time=old_time)
+    record = tm.store.get("w4")
+    if record:
+        record.created_at = old_time
+
+    with TestClient(app) as client:
+        # 1h window should NOT include 30-day-old task
+        resp1 = client.post("/tasks/retry-failed?since=1h")
+        assert resp1.json()["dispatched"] == 0
+
+        # 'all' window should include it
+        resp2 = client.post("/tasks/retry-failed?since=all")
+        assert resp2.json()["dispatched"] == 1

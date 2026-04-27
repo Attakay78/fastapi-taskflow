@@ -202,6 +202,13 @@ class PeriodicScheduler:
         self._wake.set()
 
     async def _run(self) -> None:
+        """Main scheduling loop. Runs for the lifetime of the application.
+
+        Pops entries from the min-heap whose ``next_run`` has passed, fires
+        each one, then pushes it back with an updated ``next_run``. Sleeps
+        until the nearest upcoming deadline or until woken by a new entry
+        registered via :meth:`_add_entry`.
+        """
         while True:
             now = datetime.now(timezone.utc)
 

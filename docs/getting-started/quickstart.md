@@ -89,7 +89,7 @@ sequenceDiagram
     ManagedBackgroundTasks-->>Route: task_id
     Route-->>Client: {"task_id": "..."}
 
-    Note over Executor: After response is sent
+    Note over Executor: After response is sent (default)<br/>or immediately if eager=True or priority is set
     Executor->>TaskStore: update(RUNNING)
     Executor->>Observer: on_lifecycle(RUNNING)
     Executor->>Executor: call send_email(address)

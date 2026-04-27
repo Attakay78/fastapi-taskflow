@@ -67,14 +67,15 @@ _MIGRATIONS = [
     "ALTER TABLE task_snapshots ADD COLUMN encrypted_payload TEXT",
     "ALTER TABLE task_pending_requeue ADD COLUMN encrypted_payload TEXT",
     "ALTER TABLE task_snapshots ADD COLUMN source TEXT DEFAULT 'manual'",
+    "ALTER TABLE task_snapshots ADD COLUMN priority INTEGER",
 ]
 
 _UPSERT_HISTORY = """
 INSERT OR REPLACE INTO task_snapshots
     (task_id, func_name, status, created_at, start_time, end_time,
      duration, retries_used, error, snapshotted_at, args_json, kwargs_json,
-     logs_json, stacktrace, encrypted_payload, source)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     logs_json, stacktrace, encrypted_payload, source, priority)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _UPSERT_PENDING = """
@@ -159,6 +160,7 @@ class SqliteBackend(SnapshotBackend):
                         t.stacktrace,
                         t.encrypted_payload.decode() if t.encrypted_payload else None,
                         t.source,
+                        t.priority,
                     )
                     for t in records
                 ),
@@ -340,6 +342,7 @@ class SqliteBackend(SnapshotBackend):
                     stacktrace=d.get("stacktrace"),
                     encrypted_payload=enc.encode() if enc else None,
                     source=d.get("source") or "manual",
+                    priority=d.get("priority"),
                 )
             )
         return records
