@@ -96,3 +96,4 @@ nav:
     - Scheduled Tasks: api/scheduled-tasks.md
   - Examples: examples.md
   - Changelog: changelog.md
+  - Contributing: contributing.md

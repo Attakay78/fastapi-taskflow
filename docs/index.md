@@ -217,4 +217,11 @@ def signup(email: str, background_tasks: BackgroundTasks):
   <p><a href="getting-started/installation/">Get started &rarr;</a></p>
 </div>
 
+<div class="note-section">
+  <p class="section-label">Contributing</p>
+  <p class="section-title">Get involved</p>
+  <p>Bug reports, feature requests, and pull requests are welcome. For questions or direct feedback, see the contributing page.</p>
+  <p><a href="contributing/">Contributing guide &rarr;</a></p>
+</div>
+
 </div>

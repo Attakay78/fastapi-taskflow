@@ -390,6 +390,20 @@ Each line has the format `[task_id] [func_name] 2026-01-01T12:00:00 message`. Fo
 
 fastapi-taskflow does not compete with Celery, ARQ, Taskiq, or Dramatiq. Those tools are built for distributed workers, message brokers, and high-throughput task routing. This library is for teams using FastAPI's native `BackgroundTasks` who want retries, visibility, and resilience without adding worker infrastructure.
 
+## Contributing
+
+Bug reports and pull requests are welcome. Open an issue on GitHub for anything unexpected, a feature request, or a question about intended behaviour before submitting a PR.
+
+## Contact
+
+**Quaicoe Richard (Attakay)**
+
+For questions, feedback, or anything related to the project:
+
+- Email: [richardquaicoe78@gmail.com](mailto:richardquaicoe78@gmail.com)
+- LinkedIn: [linkedin.com/in/richard-quaicoe-545ba211b](https://www.linkedin.com/in/richard-quaicoe-545ba211b/)
+- X: [@richman_khay](https://x.com/richman_khay)
+
 ## License
 
 MIT
