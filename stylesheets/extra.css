@@ -1,0 +1,516 @@
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap');
+
+:root {
+  --md-text-font: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --md-code-font: "Geist Mono", "JetBrains Mono", "Fira Code", monospace;
+
+  --tf-border: rgba(0, 0, 0, 0.08);
+  --tf-card-bg: #f9f9f9;
+  --tf-muted: #6b7280;
+  --tf-success: #16a34a;
+  --tf-danger: #dc2626;
+}
+
+[data-md-color-scheme="slate"] {
+  --tf-border: rgba(255, 255, 255, 0.08);
+  --tf-card-bg: rgba(255, 255, 255, 0.04);
+  --tf-muted: #9ca3af;
+  --tf-success: #4ade80;
+  --tf-danger: #f87171;
+}
+
+/* ------------------------------------------------------------------ */
+/* Page wrapper — remove MkDocs default padding on home                 */
+/* ------------------------------------------------------------------ */
+
+.md-content__inner {
+  margin: 0;
+  padding: 0;
+  max-width: 100%;
+}
+
+.md-content__inner > h1:first-child {
+  display: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* Hero                                                                  */
+/* ------------------------------------------------------------------ */
+
+.hero {
+  padding: 4rem 1.5rem 3rem;
+  text-align: center;
+  position: relative;
+}
+
+.hero::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: 100vw;
+  height: 1px;
+  background: var(--tf-border);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+
+.hero h1 {
+  font-size: clamp(1.75rem, 4.5vw, 2.75rem);
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.03em;
+  max-width: 720px;
+  margin: 0 auto 0.9rem;
+  color: var(--md-typeset-color);
+}
+
+.hero-accent {
+  color: #009688;
+}
+
+.hero p.sub {
+  font-size: 1rem;
+  color: var(--tf-muted);
+  max-width: 480px;
+  margin: 0 auto 2rem;
+  line-height: 1.65;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.875rem;
+  font-weight: 500;
+  padding: 0.55rem 1.25rem;
+  border-radius: 7px;
+  text-decoration: none;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.btn:hover {
+  opacity: 0.85;
+  text-decoration: none;
+}
+
+.btn-primary {
+  background: var(--md-primary-fg-color);
+  color: var(--md-primary-bg-color) !important;
+}
+
+.btn-secondary {
+  background: var(--tf-card-bg);
+  color: var(--md-typeset-color) !important;
+  border: 1px solid var(--tf-border);
+}
+
+/* ------------------------------------------------------------------ */
+/* Page layout                                                           */
+/* ------------------------------------------------------------------ */
+
+.home-page {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Full-width section dividers & fading backgrounds                     */
+/* ------------------------------------------------------------------ */
+
+/* All sections inside .home-page need relative positioning             */
+/* so ::after (divider) and ::before (background) can span 100vw        */
+.problem-section,
+.code-section,
+.dashboard-section,
+.section,
+.note-section {
+  position: relative;
+}
+
+/* Full-width divider line using ::after on all bordered sections        */
+.problem-section::after,
+.dashboard-section::after,
+.section::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: 100vw;
+  height: 1px;
+  background: var(--tf-border);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+/* Fading section backgrounds — subtle tints that read on light & dark   */
+.problem-section::before,
+.code-section::before,
+.dashboard-section::before,
+.section::before,
+.note-section::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  left: 50%;
+  width: 100vw;
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.problem-section::before {
+  background: linear-gradient(to bottom,
+    transparent,
+    rgba(0, 150, 136, 0.06) 20%,
+    rgba(0, 150, 136, 0.06) 80%,
+    transparent
+  );
+}
+
+.code-section::before {
+  background: linear-gradient(to bottom,
+    transparent,
+    rgba(16, 185, 129, 0.05) 20%,
+    rgba(16, 185, 129, 0.05) 80%,
+    transparent
+  );
+}
+
+.dashboard-section::before {
+  background: linear-gradient(to bottom,
+    transparent,
+    rgba(245, 158, 11, 0.05) 20%,
+    rgba(245, 158, 11, 0.05) 80%,
+    transparent
+  );
+}
+
+.section::before {
+  background: linear-gradient(to bottom,
+    transparent,
+    rgba(139, 92, 246, 0.05) 20%,
+    rgba(139, 92, 246, 0.05) 80%,
+    transparent
+  );
+}
+
+.note-section::before {
+  background: linear-gradient(to bottom,
+    transparent,
+    rgba(236, 72, 153, 0.04) 20%,
+    rgba(236, 72, 153, 0.04) 80%,
+    transparent
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Problem section                                                        */
+/* ------------------------------------------------------------------ */
+
+.problem-section {
+  padding: 2.5rem 0;
+}
+
+.problem-header {
+  margin-bottom: 1.25rem;
+}
+
+.problem-desc {
+  font-size: 0.9rem;
+  color: var(--tf-muted);
+  line-height: 1.65;
+  max-width: 600px;
+  margin: 0.4rem 0 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Code section                                                          */
+/* ------------------------------------------------------------------ */
+
+.code-section {
+  padding: 2.5rem 0;
+}
+
+.code-section pre {
+  border-radius: 10px;
+  border: 1px solid var(--tf-border);
+  font-size: 0.825rem;
+  line-height: 1.6;
+  margin: 0 0 1rem;
+}
+
+.code-note {
+  font-size: 0.85rem;
+  color: var(--tf-muted);
+  margin: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Comparison cards                                                      */
+/* ------------------------------------------------------------------ */
+
+.compare-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.875rem;
+}
+
+@media (max-width: 600px) {
+  .compare-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.compare-col {
+  background: var(--tf-card-bg);
+  border: 1px solid var(--tf-border);
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+}
+
+.compare-col h4 {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin: 0 0 0.75rem;
+  color: var(--tf-muted);
+}
+
+.compare-col ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.compare-col ul li {
+  font-size: 0.825rem;
+  padding: 0.2rem 0;
+  color: var(--md-typeset-color);
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+}
+
+.compare-col ul li::before {
+  content: "✓";
+  color: var(--tf-success);
+  font-weight: 700;
+  flex-shrink: 0;
+  margin-top: 0.05rem;
+}
+
+.compare-col.before ul li::before {
+  content: "✗";
+  color: var(--tf-danger);
+}
+
+/* ------------------------------------------------------------------ */
+/* Code block on homepage                                                */
+/* ------------------------------------------------------------------ */
+
+.home-code pre {
+  margin: 0;
+  border-radius: 10px;
+  border: 1px solid var(--tf-border);
+  font-size: 0.825rem;
+  line-height: 1.6;
+}
+
+/* ------------------------------------------------------------------ */
+/* Dashboard preview                                                     */
+/* ------------------------------------------------------------------ */
+
+.dashboard-section {
+  padding: 2.5rem 0;
+}
+
+.dashboard-preview {
+  border-radius: 0 8px 8px 8px;
+  overflow: hidden;
+  border: 1px solid var(--tf-border);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
+}
+
+[data-md-color-scheme="slate"] .dashboard-preview {
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+}
+
+.dashboard-img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* ------------------------------------------------------------------ */
+/* Feature grid                                                          */
+/* ------------------------------------------------------------------ */
+
+.section {
+  padding: 2.5rem 0;
+}
+
+.section-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--tf-muted);
+  margin-bottom: 0.4rem;
+}
+
+.section-title {
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin-bottom: 1.5rem;
+  color: var(--md-typeset-color);
+}
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.875rem;
+}
+
+@media (max-width: 720px) {
+  .feature-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 480px) {
+  .feature-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.feature-card {
+  background: var(--tf-card-bg);
+  border: 1px solid var(--tf-border);
+  border-radius: 10px;
+  padding: 1.1rem 1.25rem;
+}
+
+.feature-card .icon {
+  font-size: 1.1rem;
+  margin-bottom: 0.5rem;
+  display: block;
+}
+
+.feature-card h3 {
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin: 0 0 0.35rem;
+  letter-spacing: -0.01em;
+  color: var(--md-typeset-color);
+}
+
+.feature-card p {
+  font-size: 0.825rem;
+  color: var(--tf-muted);
+  margin: 0;
+  line-height: 1.6;
+}
+
+/* ------------------------------------------------------------------ */
+/* Positioning note                                                      */
+/* ------------------------------------------------------------------ */
+
+.note-section {
+  padding: 2.5rem 0 3rem;
+}
+
+.note-section p {
+  font-size: 0.9rem;
+  color: var(--tf-muted);
+  line-height: 1.7;
+  max-width: 680px;
+  margin: 0;
+}
+
+.note-section p + p {
+  margin-top: 0.75rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Dashboard preview tabs                                                */
+/* ------------------------------------------------------------------ */
+
+.preview-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--tf-border);
+  margin-bottom: 0;
+}
+
+.preview-tab {
+  padding: 9px 20px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--tf-muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  cursor: pointer;
+  transition: color 0.12s;
+  font-family: inherit;
+  letter-spacing: 0.01em;
+}
+
+.preview-tab:hover {
+  color: var(--md-typeset-color);
+}
+
+.preview-tab--active {
+  color: #009688;
+  border-bottom-color: #009688;
+  font-weight: 600;
+}
+
+.preview-panel { display: none; }
+.preview-panel--active { display: block; }
+
+/* ------------------------------------------------------------------ */
+/* Clickable images                                                      */
+/* ------------------------------------------------------------------ */
+
+.img-link {
+  display: block;
+  cursor: zoom-in;
+}
+
+/* ------------------------------------------------------------------ */
+/* Guide screenshots                                                     */
+/* ------------------------------------------------------------------ */
+
+.screenshot {
+  border-radius: 8px;
+  border: 1px solid var(--tf-border);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+  width: 100%;
+  display: block;
+  margin: 0.5rem 0 1.5rem;
+}
+
+[data-md-color-scheme="slate"] .screenshot {
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* ------------------------------------------------------------------ */
+/* Admonition tweaks                                                     */
+/* ------------------------------------------------------------------ */
+
+.md-typeset .admonition {
+  border-radius: 8px;
+}
