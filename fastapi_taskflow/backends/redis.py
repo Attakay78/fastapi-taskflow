@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal, cast
 
 from .base import SnapshotBackend
 from ..models import TaskRecord, TaskStatus
@@ -119,6 +119,7 @@ class RedisBackend(SnapshotBackend):
             else "",
             "source": record.source,
             "priority": str(record.priority) if record.priority is not None else "",
+            "executor": record.executor or "",
         }
 
     @staticmethod
@@ -157,6 +158,10 @@ class RedisBackend(SnapshotBackend):
             ),
             source=mapping.get("source") or "manual",
             priority=int(p) if (p := mapping.get("priority")) else None,
+            executor=cast(
+                "Literal['async', 'thread', 'process'] | None",
+                mapping.get("executor") or None,
+            ),
         )
 
     # ------------------------------------------------------------------

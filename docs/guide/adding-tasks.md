@@ -1,8 +1,10 @@
 # Adding Tasks
 
-Once you have a registered task function and a route wired up with one of the [injection patterns](injection.md), you enqueue work by calling `add_task()` on the injected `ManagedBackgroundTasks` instance.
+This page explains how to enqueue tasks, what `add_task()` returns, and the options available at call time.
 
-## Basic usage
+## How add_task works
+
+Once you have a task function and a route that injects `ManagedBackgroundTasks`, enqueue work by calling `add_task()`:
 
 ```python
 @app.post("/signup")
@@ -23,9 +25,9 @@ tasks.add_task(send_email, address="user@example.com")         # keyword
 tasks.add_task(resize_image, image_id, width=800, height=600)  # mixed
 ```
 
-## Storing the task ID
+## Using the task_id to track status
 
-The returned `task_id` can be stored and used to query task status later via the API:
+The returned `task_id` can be stored in your database and used later to query task status via the API:
 
 ```python
 @app.post("/report")
@@ -41,11 +43,13 @@ def report_status(task_id: str):
     return record.to_dict()
 ```
 
+You can also query via the built-in API route at `GET /tasks/{task_id}` when `TaskAdmin` is mounted.
+
 ## Idempotency keys
 
-Pass an `idempotency_key` to prevent the same logical operation from running more than once, even if the route is called multiple times:
+Some operations should only run once, even if a client retries the request. Pass an `idempotency_key` to prevent duplicate execution:
 
-```python
+```python hl_lines="6"
 @app.post("/invoice/{invoice_id}/send")
 def send_invoice(invoice_id: int, tasks=Depends(task_manager.get_tasks)):
     task_id = tasks.add_task(
@@ -56,13 +60,19 @@ def send_invoice(invoice_id: int, tasks=Depends(task_manager.get_tasks)):
     return {"task_id": task_id}
 ```
 
-If a non-failed task with the same key already exists, `add_task()` returns its existing `task_id` without enqueuing the function again. This works within a single process and across multiple instances when a shared backend is configured.
+If a non-failed task with the same key already exists, `add_task()` returns its existing `task_id` without enqueuing the function again. No duplicate task is created.
+
+!!! note
+    Idempotency checks are performed in-process first (fast, no I/O). When a shared backend is configured and multiple instances are running, the check also covers tasks from other instances.
+
+!!! tip
+    A failed task does not block a re-run. If a task fails and you want to retry it, the existing key will not prevent a new attempt.
 
 ## Tags
 
-Attach key/value labels to a task at enqueue time with `tags=`. Tags are stored on the task record and forwarded to every log and lifecycle event emitted by the task, making it easy to filter logs in downstream systems.
+Tags are key/value labels you attach to a task at enqueue time. They travel with the task through its entire lifecycle and are forwarded to every log and lifecycle event, making it straightforward to filter or aggregate by label in downstream systems.
 
-```python
+```python hl_lines="6"
 @app.post("/invoice")
 def create_invoice(user_id: int, plan: str, tasks=Depends(task_manager.get_tasks)):
     task_id = tasks.add_task(
@@ -73,7 +83,7 @@ def create_invoice(user_id: int, plan: str, tasks=Depends(task_manager.get_tasks
     return {"task_id": task_id}
 ```
 
-Tags are accessible inside the task function via `get_task_context()`:
+Inside the task function, tags are accessible via `get_task_context()`:
 
 ```python
 from fastapi_taskflow import get_task_context, task_log
@@ -87,19 +97,40 @@ def process_invoice(user_id: int) -> None:
 
 See [Task Context](task-context.md) for the full `get_task_context()` API.
 
+## Overriding eager and priority per call
+
+The `eager` and `priority` values set on the decorator apply to every call. You can override them for a specific enqueue without changing the decorator:
+
+```python
+# Normally this task runs after the response.
+# For this one call, dispatch it immediately.
+task_id = tasks.add_task(send_email, email, eager=True)
+
+# Route this call through the priority queue at level 9.
+task_id = tasks.add_task(send_alert, message, priority=9)
+```
+
+**`eager=True`**: The task is dispatched via `asyncio.create_task` immediately when `add_task()` is called, before FastAPI sends the response. Use this when you need the task to start before the response goes out.
+
+**`priority`**: Routes the task through the priority queue instead of the standard background task list. Higher integers run first. The conventional range is 1 (lowest) to 10 (highest), but any integer is accepted. Tasks with the same priority execute in arrival order (FIFO).
+
+!!! info
+    When `priority` is set, the `eager` flag is ignored. The priority queue provides its own non-blocking dispatch path.
+
 ## Adding tasks outside a route
 
-If you need to enqueue a task outside a request context (e.g. from a startup handler or a management script), construct `ManagedBackgroundTasks` directly and schedule it with `asyncio`:
+If you need to enqueue a task from a startup handler, a management script, or anywhere else without a request context, construct `ManagedBackgroundTasks` directly and dispatch with `asyncio.create_task`:
 
 ```python
 import asyncio
 from fastapi_taskflow import ManagedBackgroundTasks
-from fastapi_taskflow.executor import make_background_func
 
 async def on_startup():
     tasks = ManagedBackgroundTasks(task_manager)
-    task_id = tasks.add_task(sync_database)
-    asyncio.create_task(tasks.tasks[-1]())
+    task_id = tasks.add_task(sync_database, eager=True)
 ```
 
-For most cases, the route-based patterns are simpler and preferred. Direct construction is only needed when no request context is available.
+!!! note
+    Pass `eager=True` (or `priority=...`) when adding tasks outside a route. Without a request lifecycle to trigger Starlette's background runner, the task would sit in the queue and never be dispatched.
+
+For most situations, the route-based injection patterns are simpler and preferred. Direct construction is only necessary when no request context is available.

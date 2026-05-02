@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal, Optional
 
 
 class TaskStatus(str, Enum):
@@ -52,16 +52,26 @@ class TaskConfig:
             first. The conventional range is 1 (lowest) to 10 (highest) with
             5 as the midpoint, but any integer is accepted. Per-call
             ``priority`` on ``add_task()`` overrides this value.
+        executor: Explicit executor selection. One of ``"async"``, ``"thread"``,
+            or ``"process"``. When ``None`` (the default), the executor is
+            chosen automatically: ``"async"`` for ``async def`` functions and
+            ``"thread"`` for plain ``def`` functions. Setting this explicitly
+            to ``"process"`` routes the task through a
+            :class:`concurrent.futures.ProcessPoolExecutor` worker, which is
+            appropriate for CPU-bound work that would otherwise block the event
+            loop. See :mod:`fastapi_taskflow.executors.process_executor` for
+            constraints and configuration.
     """
 
     retries: int = 0
     delay: float = 0.0
     backoff: float = 1.0
     persist: bool = False
-    name: str | None = None
+    name: Optional[str] = None
     requeue_on_interrupt: bool = False
     eager: bool = False
-    priority: int | None = None
+    priority: Optional[int] = None
+    executor: Optional[Literal["async", "thread", "process"]] = None
 
 
 @dataclass
@@ -103,6 +113,9 @@ class TaskRecord:
             task was routed through the standard Starlette mechanism (no
             explicit priority). Any integer when routed through the priority
             queue; higher values ran first.
+        executor: The executor that ran (or will run) this task. One of
+            ``"async"``, ``"thread"``, or ``"process"``. Reflects the
+            effective executor after auto-detection, not the raw config value.
     """
 
     task_id: str
@@ -122,6 +135,7 @@ class TaskRecord:
     encrypted_payload: bytes | None = field(default=None)
     source: str = "manual"
     priority: int | None = None
+    executor: Optional[Literal["async", "thread", "process"]] = None
 
     @property
     def duration(self) -> float | None:
@@ -148,6 +162,7 @@ class TaskRecord:
             "tags": dict(self.tags),
             "source": self.source,
             "priority": self.priority,
+            "executor": self.executor,
         }
 
 

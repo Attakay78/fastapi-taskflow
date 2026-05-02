@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 import collections
 import concurrent.futures
+import inspect
 import time
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 from fastapi import BackgroundTasks
 
+from .executors.async_executor import AsyncExecutor
+from .executors.process_executor import LazyProcessExecutor
+from .executors.thread_executor import ThreadExecutor
 from .loggers.chain import LoggerChain
 from .loggers.file import FileLogger
 from .models import TaskConfig
@@ -18,6 +22,7 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
     from .backends.base import SnapshotBackend
+    from .executors.base import Executor
     from .loggers.base import TaskObserver
     from .loggers.chain import LoggerChain
     from .models import TaskRecord
@@ -50,6 +55,10 @@ class TaskManager:
             return {"task_id": task_id}
     """
 
+    # ------------------------------------------------------------------
+    # Configuration
+    # ------------------------------------------------------------------
+
     def __init__(
         self,
         *,
@@ -69,6 +78,8 @@ class TaskManager:
         encrypt_args_key: Optional[bytes | str] = None,
         max_concurrent_tasks: Optional[int] = None,
         max_sync_threads: Optional[int] = None,
+        max_process_workers: Optional[int] = None,
+        process_shutdown_timeout: float = 30.0,
         retention_days: Optional[float] = None,
     ) -> None:
         """
@@ -132,14 +143,15 @@ class TaskManager:
 
             max_concurrent_tasks: Maximum number of async tasks that may run
                 concurrently on the event loop. When set, an
-                ``asyncio.Semaphore`` is acquired before each task execution
-                and released on completion. Tasks that exceed this limit wait
-                for a slot without blocking the event loop or delaying request
-                handlers. Defaults to ``None`` (no limit, existing behaviour).
+                ``asyncio.Semaphore`` is acquired before each async task
+                execution and released on completion. Tasks that exceed this
+                limit wait for a slot without blocking the event loop or
+                delaying request handlers. Defaults to ``None`` (no limit).
 
-                Tune this based on your workload. IO-bound tasks (network calls,
-                email, webhooks) tolerate higher values (10-20). Reduce it if
-                you observe elevated request latency under task burst load::
+                Tune this based on your workload. IO-bound tasks (network
+                calls, email, webhooks) tolerate higher values (10-20). Reduce
+                it if you observe elevated request latency under task burst
+                load::
 
                     TaskManager(max_concurrent_tasks=10)
 
@@ -148,13 +160,30 @@ class TaskManager:
                 offloaded to this isolated pool instead of the default
                 ``asyncio`` thread pool, preventing a burst of sync tasks from
                 exhausting threads needed by sync request handlers. Defaults to
-                ``None`` (uses ``asyncio.to_thread``, existing behaviour).
-
-                Set this to roughly ``os.cpu_count() + 4`` for IO-bound sync
-                tasks, or closer to ``os.cpu_count()`` for CPU-bound ones::
+                ``None`` (uses ``asyncio.to_thread``)::
 
                     TaskManager(max_sync_threads=8)
 
+            max_process_workers: Maximum number of worker processes in the
+                :class:`concurrent.futures.ProcessPoolExecutor` used by
+                ``executor='process'`` tasks. ``None`` (the default) uses
+                :func:`os.cpu_count` at pool creation time. The pool is
+                created lazily on the first dispatch of a process executor
+                task; users who never opt in pay zero cost.
+
+                Each worker is a full Python interpreter. Size this according
+                to available memory (roughly 50-100 MB resident per worker on
+                a typical application). For pure CPU-bound work, a value of
+                ``os.cpu_count()`` is appropriate. For mixed workloads, reduce
+                it to leave threads and event loop capacity for other tasks::
+
+                    TaskManager(max_process_workers=4)
+
+            process_shutdown_timeout: Seconds to wait for in-flight process
+                executor tasks during :meth:`shutdown`. Tasks still running
+                after this window are terminated and their records are marked
+                ``INTERRUPTED``, where the existing ``requeue_on_interrupt``
+                mechanism applies. Default is 30 seconds.
             retention_days: Automatically delete terminal task records (success,
                 failed, cancelled) older than this many days. Pruning runs
                 approximately every 6 hours during the snapshot loop. Defaults
@@ -164,9 +193,9 @@ class TaskManager:
         self.registry = TaskRegistry()
         self.store = TaskStore()
 
-        # Concurrency controls — both default to None (opt-in, old behaviour
-        # preserved when not set).
-        self._task_semaphore: asyncio.Semaphore | None = (
+        # Concurrency controls for the async and thread executors.
+        # Both default to None (opt-in; existing behaviour preserved when not set).
+        _semaphore: asyncio.Semaphore | None = (
             asyncio.Semaphore(max_concurrent_tasks)
             if max_concurrent_tasks is not None
             else None
@@ -180,6 +209,20 @@ class TaskManager:
             if max_sync_threads is not None
             else None
         )
+
+        # Executor registry: keyed by the string values accepted by executor= on @task.
+        # LazyProcessExecutor is always registered but creates no OS processes until
+        # the first process executor task is dispatched.
+        self._executors: dict[str, "Executor"] = {
+            "async": AsyncExecutor(semaphore=_semaphore),
+            "thread": ThreadExecutor(pool=self._sync_executor),
+            "process": LazyProcessExecutor(
+                max_workers=max_process_workers,
+                shutdown_timeout=process_shutdown_timeout,
+            ),
+        }
+
+        self._process_shutdown_timeout = process_shutdown_timeout
 
         self.fernet: Any = None
         if encrypt_args_key is not None:
@@ -270,7 +313,7 @@ class TaskManager:
             app = FastAPI()
             task_manager.init_app(app)
 
-        Calling this more than once on the same app is safe — the hooks are
+        Calling this more than once on the same app is safe -- the hooks are
         only registered the first time.
 
         :class:`~fastapi_taskflow.TaskAdmin` calls this automatically, so you
@@ -332,6 +375,8 @@ class TaskManager:
         4. Call ``close()`` on all configured observers (loggers).
         5. Shut down the dedicated sync task thread pool (if
            ``max_sync_threads`` was set), waiting for in-flight tasks to finish.
+        6. Drain in-flight process executor tasks up to ``process_shutdown_timeout``
+           seconds, then terminate any remaining workers.
 
         :class:`~fastapi_taskflow.TaskAdmin` calls this automatically on app
         shutdown. When not using ``TaskAdmin``, call this yourself in a
@@ -361,6 +406,37 @@ class TaskManager:
             await self.logger.close()
         if self._sync_executor is not None:
             self._sync_executor.shutdown(wait=True)
+        # Drain the process executor pool if it was started, waiting up to the
+        # configured timeout before forcefully terminating remaining workers.
+        process_executor = self._executors.get("process")
+        if process_executor is not None:
+            await process_executor.shutdown(timeout=self._process_shutdown_timeout)
+
+    # ------------------------------------------------------------------
+    # Executor helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_executor(self, func: Callable, config: TaskConfig) -> "Executor":
+        """Return the concrete executor for *func* based on its registered config.
+
+        When ``config.executor`` is set explicitly (``"async"``, ``"thread"``,
+        or ``"process"``), that value is used directly. When it is ``None``,
+        the executor is inferred from the function signature: ``"async"`` for
+        ``async def`` functions and ``"thread"`` for plain ``def`` functions.
+
+        Args:
+            func: The task function.
+            config: The :class:`~fastapi_taskflow.models.TaskConfig` attached
+                to *func* by the ``@task`` decorator.
+
+        Returns:
+            The :class:`~fastapi_taskflow.executors.base.Executor` instance
+            registered under the resolved executor name.
+        """
+        if config.executor is not None:
+            return self._executors[config.executor]
+        name = "async" if inspect.iscoroutinefunction(func) else "thread"
+        return self._executors[name]
 
     # ------------------------------------------------------------------
     # Priority queue
@@ -415,6 +491,7 @@ class TaskManager:
     def task(
         self,
         *,
+        executor: Optional[Literal["async", "thread", "process"]] = None,
         retries: int = 0,
         delay: float = 0.0,
         backoff: float = 1.0,
@@ -431,6 +508,27 @@ class TaskManager:
         can still be called directly in tests or other contexts.
 
         Args:
+            executor: Explicit executor selection. One of ``"async"``,
+                ``"thread"``, or ``"process"``. When omitted (the default),
+                the executor is chosen automatically based on the function
+                signature: ``"async"`` for ``async def`` functions and
+                ``"thread"`` for plain ``def`` functions.
+
+                Use ``executor="process"`` to route the task through a
+                :class:`concurrent.futures.ProcessPoolExecutor` worker, which
+                is appropriate for CPU-bound work. Process tasks must be
+                module-level functions with picklable arguments. See
+                :mod:`fastapi_taskflow.executors.process_executor` for full
+                constraints::
+
+                    @task_manager.task(executor="process", retries=2)
+                    def render_pdf(template: str, data: dict) -> bytes:
+                        ...
+
+                Mismatches are caught at decoration time, not at enqueue time:
+                ``executor='async'`` on a sync function raises :exc:`ValueError`
+                immediately. ``executor='thread'`` on an async function does
+                the same.
             retries: Number of additional attempts after the first failure.
             delay: Seconds to wait before the first retry.
             backoff: Multiplier applied to *delay* on each retry (e.g. ``2.0``
@@ -448,7 +546,10 @@ class TaskManager:
             eager: When ``True``, dispatch via ``asyncio.create_task``
                 immediately when ``add_task()`` is called, before FastAPI sends
                 the response. Per-call ``eager`` on ``add_task()`` overrides
-                this value.
+                this value. Note: ``eager=True`` combined with
+                ``executor='process'`` logs a warning and falls back to
+                in-process execution, because the process pool cannot be used
+                before the response is sent.
             priority: Route this function through the priority queue instead of
                 Starlette's background task list. Higher values run first.
                 Conventional range is 1 (lowest) to 10 (highest). Per-call
@@ -460,6 +561,12 @@ class TaskManager:
             @task_manager.task(retries=3, delay=1.0, backoff=2.0)
             def send_email(address: str) -> None:
                 ...
+
+        Raises:
+            ValueError: If *executor* is explicitly set and the function's
+                signature is incompatible (e.g. ``executor='async'`` on a
+                sync function, or ``executor='process'`` on a non-module-level
+                function).
         """
 
         def decorator(func: Callable) -> Callable:
@@ -472,11 +579,21 @@ class TaskManager:
                 requeue_on_interrupt=requeue_on_interrupt,
                 eager=eager,
                 priority=priority,
+                executor=executor,
             )
+            # Run static validation on the decorated function if an executor
+            # was explicitly requested. Auto-detected executors have no
+            # constraints to enforce at decoration time.
+            if executor is not None:
+                self._executors[executor].validate(func)
             self.registry.register(func, config)
             return func
 
         return decorator
+
+    # ------------------------------------------------------------------
+    # Scheduling
+    # ------------------------------------------------------------------
 
     def schedule(
         self,
@@ -489,6 +606,7 @@ class TaskManager:
         name: Optional[str] = None,
         run_on_startup: bool = False,
         timezone: str = "UTC",
+        executor: Optional[Literal["async", "thread", "process"]] = None,
     ) -> Callable:
         """Register a function as a periodic background task.
 
@@ -515,6 +633,13 @@ class TaskManager:
             timezone: IANA timezone name used when evaluating *cron*
                 expressions (e.g. ``"America/New_York"``). Ignored when
                 *every* is used. Defaults to ``"UTC"``.
+            executor: Force a specific executor for each firing. ``"async"``
+                runs the function as a coroutine (default for async functions),
+                ``"thread"`` runs it in a thread pool (default for sync
+                functions), and ``"process"`` runs it in a separate OS process.
+                When ``None``, the executor is auto-detected from the function
+                signature. Process tasks must be module-level importable
+                functions.
 
         Example::
 
@@ -526,8 +651,16 @@ class TaskManager:
             async def morning_report() -> None:
                 ...
 
+            @task_manager.schedule(every=3600, executor="process")
+            def rebuild_index() -> None:
+                ...
+
         Raises:
             ValueError: If neither or both of *every* and *cron* are provided.
+            ValueError: If *executor* is explicitly set and the function's
+                signature is incompatible (e.g. ``executor='async'`` on a sync
+                function, or ``executor='process'`` on a non-module-level
+                function).
             ImportError: If *cron* is used and ``croniter`` is not installed.
         """
         if (every is None) == (cron is None):
@@ -541,7 +674,10 @@ class TaskManager:
                 delay=delay,
                 backoff=backoff,
                 name=name or func.__name__,
+                executor=executor,
             )
+            if executor is not None:
+                self._executors[executor].validate(func)
             self.registry.register(func, config)
 
             from .periodic import PeriodicScheduler, ScheduledEntry
@@ -561,7 +697,7 @@ class TaskManager:
                 self._periodic_scheduler = PeriodicScheduler(self, [], backend=backend)
                 self._periodic_scheduler._entries.append(entry)
             else:
-                # Scheduler already started — use _add_entry to push into
+                # Scheduler already started -- use _add_entry to push into
                 # the live heap and wake the loop immediately.
                 if self._periodic_scheduler._bg_task is not None:
                     self._periodic_scheduler._add_entry(entry)
@@ -610,6 +746,10 @@ class TaskManager:
         """
         return self.get_tasks
 
+    # ------------------------------------------------------------------
+    # Multi-instance
+    # ------------------------------------------------------------------
+
     async def merged_list(self) -> "list[TaskRecord]":
         """Return all known task records, merging the in-memory store with the backend.
 
@@ -653,6 +793,10 @@ class TaskManager:
         """Force the next merged_list() call to reload from the backend."""
         self._backend_cache = []
         self._backend_cache_ts = 0.0
+
+    # ------------------------------------------------------------------
+    # Patch
+    # ------------------------------------------------------------------
 
     def install(self, app: "FastAPI") -> None:
         """Patch FastAPI so existing ``BackgroundTasks`` routes get managed tasks automatically.

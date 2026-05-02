@@ -1,7 +1,7 @@
 import asyncio
 import threading
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional, cast
 
 from .models import TaskRecord, TaskStatus
 
@@ -98,6 +98,7 @@ class TaskStore:
         encrypted_payload: Optional[bytes] = None,
         source: str = "manual",
         priority: Optional[int] = None,
+        executor: Optional[str] = None,
     ) -> TaskRecord:
         """Create a new ``PENDING`` record and add it to the store.
 
@@ -116,6 +117,9 @@ class TaskStore:
                 tasks, ``"scheduled"`` for periodic scheduler fires.
             priority: Priority level for the task. ``None`` when not using
                 the priority queue. Higher integers run first.
+            executor: Effective executor name (``"async"``, ``"thread"``, or
+                ``"process"``). Stored on the record so the dashboard can
+                display it without re-resolving config.
         """
         record = TaskRecord(
             task_id=task_id,
@@ -128,6 +132,7 @@ class TaskStore:
             encrypted_payload=encrypted_payload,
             source=source,
             priority=priority,
+            executor=cast(Optional[Literal["async", "thread", "process"]], executor),
         )
         with self._lock:
             self._tasks[task_id] = record
@@ -213,14 +218,14 @@ class TaskStore:
             TaskStatus.INTERRUPTED,
             TaskStatus.CANCELLED,
         }
+        _cutoff = cutoff.replace(tzinfo=None) if cutoff.tzinfo is not None else cutoff
         to_remove = []
         with self._lock:
             for task_id, record in self._tasks.items():
-                if (
-                    record.status in _terminal
-                    and record.end_time is not None
-                    and record.end_time < cutoff
-                ):
+                end = record.end_time
+                if end is not None and end.tzinfo is not None:
+                    end = end.replace(tzinfo=None)
+                if record.status in _terminal and end is not None and end < _cutoff:
                     to_remove.append(task_id)
             for task_id in to_remove:
                 del self._tasks[task_id]

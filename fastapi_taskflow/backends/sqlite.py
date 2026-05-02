@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS task_snapshots (
     logs_json         TEXT,
     stacktrace        TEXT,
     encrypted_payload TEXT,
-    source            TEXT DEFAULT 'manual'
+    source            TEXT DEFAULT 'manual',
+    executor          TEXT
 )
 """
 
@@ -68,14 +69,15 @@ _MIGRATIONS = [
     "ALTER TABLE task_pending_requeue ADD COLUMN encrypted_payload TEXT",
     "ALTER TABLE task_snapshots ADD COLUMN source TEXT DEFAULT 'manual'",
     "ALTER TABLE task_snapshots ADD COLUMN priority INTEGER",
+    "ALTER TABLE task_snapshots ADD COLUMN executor TEXT",
 ]
 
 _UPSERT_HISTORY = """
 INSERT OR REPLACE INTO task_snapshots
     (task_id, func_name, status, created_at, start_time, end_time,
      duration, retries_used, error, snapshotted_at, args_json, kwargs_json,
-     logs_json, stacktrace, encrypted_payload, source, priority)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     logs_json, stacktrace, encrypted_payload, source, priority, executor)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _UPSERT_PENDING = """
@@ -161,6 +163,7 @@ class SqliteBackend(SnapshotBackend):
                         t.encrypted_payload.decode() if t.encrypted_payload else None,
                         t.source,
                         t.priority,
+                        t.executor,
                     )
                     for t in records
                 ),
@@ -343,6 +346,7 @@ class SqliteBackend(SnapshotBackend):
                     encrypted_payload=enc.encode() if enc else None,
                     source=d.get("source") or "manual",
                     priority=d.get("priority"),
+                    executor=d.get("executor"),
                 )
             )
         return records

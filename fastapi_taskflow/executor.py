@@ -7,19 +7,24 @@ log capture, and optional persistence on completion.
 :func:`make_background_func` wraps ``execute_task`` into a zero-argument
 async callable that FastAPI's ``BackgroundTasks`` can call after the response
 is sent.
+
+Dispatch is routed through the :class:`~fastapi_taskflow.executors.base.Executor`
+protocol so that async, thread, and process execution share a uniform interface.
+The concrete executor instance is selected once at enqueue time (in
+:class:`~fastapi_taskflow.wrapper.ManagedBackgroundTasks`) and carried through
+to this module as the ``executor_obj`` parameter.
 """
 
 import asyncio
-import concurrent.futures
 import contextvars
-import functools
-import inspect
+import logging
 import pickle
 import sys
 import traceback
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
+from .executors.base import TaskExecutionContext
 from .models import TaskConfig, TaskStatus
 from .store import TaskStore
 from .task_logging import (
@@ -30,6 +35,7 @@ from .task_logging import (
 
 if TYPE_CHECKING:
     from .backends.base import SnapshotBackend
+    from .executors.base import Executor
     from .loggers.base import TaskObserver
 
 from .loggers.base import LifecycleEvent, LogEvent
@@ -77,7 +83,7 @@ def _build_exec_ctx(
 
 
 def _schedule_log(
-    coro: "Coroutine[Any, Any, Any]",
+    coro: "Any",
     loop: asyncio.AbstractEventLoop,
     pending: list,
 ) -> None:
@@ -119,13 +125,12 @@ async def execute_task(
     store: TaskStore,
     args: tuple,
     kwargs: dict,
+    executor_obj: "Optional[Executor]" = None,
     backend: "Optional[SnapshotBackend]" = None,
     on_success: "Optional[Callable]" = None,
     logger: "Optional[TaskObserver]" = None,
     encryptor: Any = None,
     captured_ctx: Optional[contextvars.Context] = None,
-    semaphore: Optional[asyncio.Semaphore] = None,
-    sync_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None,
     running_tasks: Optional[dict] = None,
 ) -> None:
     """Run *func* through the full task lifecycle: PENDING -> RUNNING -> SUCCESS | FAILED.
@@ -134,11 +139,11 @@ async def execute_task(
     captures :func:`~fastapi_taskflow.task_logging.task_log` entries per attempt.
     The full traceback of the final failure is stored on the task record.
 
-    Both sync and async functions are supported. Sync functions are offloaded
-    to a thread pool so they do not block the event loop. When *sync_executor*
-    is provided, tasks run in that dedicated pool instead of the default
-    ``asyncio`` thread pool, isolating sync task execution from sync request
-    handlers.
+    Dispatch is routed through *executor_obj*, which encapsulates whether the
+    function runs as a coroutine, in a thread pool, or in a process pool.
+    When *executor_obj* is ``None`` the executor is inferred from the function
+    signature (async -> event loop, sync -> thread pool), preserving backward
+    compatibility for call sites that have not yet been updated.
 
     Args:
         func: The task function to run (sync or async).
@@ -149,6 +154,9 @@ async def execute_task(
             carries an ``encrypted_payload`` and *encryptor* is provided.
         kwargs: Keyword arguments to pass to *func*. Ignored when the record
             carries an ``encrypted_payload`` and *encryptor* is provided.
+        executor_obj: Concrete executor that handles the actual function
+            dispatch. When ``None``, the legacy implicit dispatch path is used
+            (auto-detect from ``asyncio.iscoroutinefunction``).
         backend: When provided, used to check cross-instance idempotency keys
             before running and to record the key on success.
         on_success: Async callable invoked with *task_id* right after SUCCESS.
@@ -164,48 +172,26 @@ async def execute_task(
             time. When provided, the task function runs inside this context so
             trace context (OpenTelemetry spans, etc.) propagates from the
             originating request into the background execution.
-        semaphore: Optional ``asyncio.Semaphore`` that caps how many async tasks
-            hold event loop time simultaneously. When set, the semaphore is
-            acquired before execution begins and released on completion,
-            regardless of success or failure. Tasks waiting for a slot do not
-            block the event loop. Corresponds to ``max_concurrent_tasks`` on
-            :class:`~fastapi_taskflow.TaskManager`.
-        sync_executor: Optional dedicated ``ThreadPoolExecutor`` for sync task
-            functions. When set, sync functions run in this pool instead of the
-            default ``asyncio`` thread pool, preventing task bursts from
-            exhausting threads needed by sync request handlers. Corresponds to
-            ``max_sync_threads`` on :class:`~fastapi_taskflow.TaskManager`.
         running_tasks: Shared dict mapping ``task_id`` to the asyncio Task or
             Future currently executing that function. Populated when the task
             enters ``RUNNING`` and removed on completion or cancellation. Used
             by ``POST /tasks/{task_id}/cancel`` to cancel running async tasks.
     """
-    # The semaphore caps concurrent async task execution only. Sync tasks run
-    # in a ThreadPoolExecutor whose max_workers already limits concurrency
-    use_semaphore = semaphore is not None and inspect.iscoroutinefunction(func)
-
-    if use_semaphore:
-        await semaphore.acquire()  # type: ignore[union-attr]
-
-    try:
-        await _execute_task_inner(
-            func=func,
-            task_id=task_id,
-            config=config,
-            store=store,
-            args=args,
-            kwargs=kwargs,
-            backend=backend,
-            on_success=on_success,
-            logger=logger,
-            encryptor=encryptor,
-            captured_ctx=captured_ctx,
-            sync_executor=sync_executor,
-            running_tasks=running_tasks,
-        )
-    finally:
-        if use_semaphore:
-            semaphore.release()  # type: ignore[union-attr]
+    await _execute_task_inner(
+        func=func,
+        task_id=task_id,
+        config=config,
+        store=store,
+        args=args,
+        kwargs=kwargs,
+        executor_obj=executor_obj,
+        backend=backend,
+        on_success=on_success,
+        logger=logger,
+        encryptor=encryptor,
+        captured_ctx=captured_ctx,
+        running_tasks=running_tasks,
+    )
 
 
 async def _execute_task_inner(
@@ -215,16 +201,15 @@ async def _execute_task_inner(
     store: TaskStore,
     args: tuple,
     kwargs: dict,
+    executor_obj: "Optional[Executor]" = None,
     backend: "Optional[SnapshotBackend]" = None,
     on_success: "Optional[Callable]" = None,
     logger: "Optional[TaskObserver]" = None,
     encryptor: Any = None,
     captured_ctx: Optional[contextvars.Context] = None,
-    sync_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None,
     running_tasks: Optional[dict] = None,
 ) -> None:
-    """Inner execution body. Called by :func:`execute_task` after the optional
-    semaphore is acquired. Not intended for direct use."""
+    """Inner execution body, called by :func:`execute_task`. Not for direct use."""
     record = store.get(task_id)
     func_name = func.__name__
     tags: dict[str, str] = record.tags if record is not None else {}
@@ -249,7 +234,15 @@ async def _execute_task_inner(
 
     # Cross-instance idempotency check.
     if record is not None and record.idempotency_key and backend is not None:
-        existing_id = await backend.check_idempotency_key(record.idempotency_key)
+        try:
+            existing_id = await backend.check_idempotency_key(record.idempotency_key)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "fastapi-taskflow: idempotency key check failed for task %s, "
+                "proceeding without deduplication.",
+                task_id,
+            )
+            existing_id = None
         if existing_id is not None and existing_id != task_id:
             store.update(
                 task_id,
@@ -306,7 +299,7 @@ async def _execute_task_inner(
     # exec_start default covers the case where CancelledError fires before the
     # first attempt sets it (e.g. during a retry sleep).
     exec_start = task_start
-    # Reference to the asyncio Task/Future running the current attempt.
+    # Reference to the asyncio Task/Future running the current dispatch.
     # Stored so the cancel endpoint can call .cancel() on it directly.
     _inner_task: Optional[asyncio.Task] = None
 
@@ -328,54 +321,56 @@ async def _execute_task_inner(
             )
 
             # Build an execution context that merges trace context (from captured_ctx)
-            # with the task-specific log sink and TaskContext vars.
+            # with the task-specific log sink and TaskContext vars. Used by
+            # async and thread executors; ignored by the process executor.
             exec_ctx = _build_exec_ctx(captured_ctx, sink, ctx_obj)
 
-            # Capture execution time around the function call only, excluding
-            # retry delays, status updates, and other lifecycle overhead.
+            # TaskExecutionContext carries the same fields in a plain-dict-
+            # serializable form for cross-process transport by the process executor.
+            task_exec_ctx = TaskExecutionContext(
+                task_id=task_id,
+                func_name=func_name,
+                attempt=attempt,
+                tags=tags,
+            )
+
             exec_start = datetime.now(timezone.utc)
 
             try:
-                if inspect.iscoroutinefunction(func):
-                    # asyncio.create_task supports context= only on Python 3.11+.
-                    # On older versions fall back to a wrapper coroutine that sets
-                    # the task-specific vars directly; trace context propagation
-                    # is best-effort and requires Python 3.11+.
-                    if sys.version_info >= (3, 11):
-                        _inner_task = asyncio.create_task(
-                            func(*actual_args, **actual_kwargs), context=exec_ctx
-                        )
-                    else:
-
-                        async def _run_in_ctx() -> None:
-                            t1 = _log_sink.set(sink)
-                            t2 = _task_context.set(ctx_obj)
-                            try:
-                                await func(*actual_args, **actual_kwargs)
-                            finally:
-                                _log_sink.reset(t1)
-                                _task_context.reset(t2)
-
-                        _inner_task = asyncio.create_task(_run_in_ctx())
+                if executor_obj is not None:
+                    # Route through the registered executor (async, thread, or process).
+                    dispatch_coro = executor_obj.dispatch(
+                        func,
+                        actual_args,
+                        actual_kwargs,
+                        task_exec_ctx,
+                        exec_ctx,
+                        sink,
+                        loop,
+                    )
+                    _inner_task = asyncio.ensure_future(dispatch_coro)
                 else:
-                    # Run the sync function in a thread, inside exec_ctx so both
-                    # trace vars and task_log() work correctly.
-                    # When a dedicated executor is configured, use it to isolate
-                    # sync task threads from the default asyncio thread pool used
-                    # by sync request handlers.
-                    _loop = asyncio.get_running_loop()
-                    if sync_executor is not None:
-                        # run_in_executor does not support kwargs directly.
-                        # Use functools.partial to bind both args and kwargs before
-                        # passing to exec_ctx.run so keyword arguments are preserved.
-                        _inner_task = asyncio.ensure_future(
-                            _loop.run_in_executor(
-                                sync_executor,
-                                functools.partial(
-                                    exec_ctx.run, func, *actual_args, **actual_kwargs
-                                ),
+                    # Legacy implicit dispatch: auto-detect from function signature.
+                    # Preserved for backward compatibility with direct execute_task callers.
+                    import inspect as _inspect
+
+                    if _inspect.iscoroutinefunction(func):
+                        if sys.version_info >= (3, 11):
+                            _inner_task = asyncio.create_task(
+                                func(*actual_args, **actual_kwargs), context=exec_ctx
                             )
-                        )
+                        else:
+
+                            async def _run_in_ctx() -> None:
+                                t1 = _log_sink.set(sink)
+                                t2 = _task_context.set(ctx_obj)
+                                try:
+                                    await func(*actual_args, **actual_kwargs)
+                                finally:
+                                    _log_sink.reset(t1)
+                                    _task_context.reset(t2)
+
+                            _inner_task = asyncio.create_task(_run_in_ctx())
                     else:
                         _inner_task = asyncio.ensure_future(
                             asyncio.to_thread(
@@ -415,15 +410,27 @@ async def _execute_task_inner(
                     and record.idempotency_key
                     and backend is not None
                 ):
-                    await backend.record_idempotency_key(
-                        record.idempotency_key, task_id
-                    )
+                    try:
+                        await backend.record_idempotency_key(
+                            record.idempotency_key, task_id
+                        )
+                    except Exception:
+                        logging.getLogger(__name__).exception(
+                            "fastapi-taskflow: failed to record idempotency key for task %s, "
+                            "duplicate execution is possible if this task is retried externally.",
+                            task_id,
+                        )
                 return
 
             except Exception as exc:  # noqa: BLE001
                 _inner_task = None
                 last_error = exc
-                last_tb = traceback.format_exc()
+                # For process executor tasks, _WorkerException attaches the
+                # full worker-side traceback as _worker_traceback so the
+                # dashboard error panel shows the complete call stack.
+                last_tb = (
+                    getattr(exc, "_worker_traceback", None) or traceback.format_exc()
+                )
 
         await _drain_pending(_pending_log)
 
@@ -454,10 +461,10 @@ async def _execute_task_inner(
             )
 
     except asyncio.CancelledError:
-        # Cancel the inner function task if it is still running (async tasks).
-        # For sync tasks running in a thread pool, the thread cannot be
-        # interrupted; cancellation stops the await but the thread runs to
-        # completion in the background.
+        # Cancel the inner dispatch task if it is still running (async tasks).
+        # For sync tasks running in a thread pool or process pool, the
+        # underlying work cannot be interrupted; cancellation stops the await
+        # but the thread or worker runs to completion in the background.
         if _inner_task is not None and not _inner_task.done():
             _inner_task.cancel()
         await _drain_pending(_pending_log)
@@ -494,13 +501,12 @@ def make_background_func(
     store: TaskStore,
     args: tuple,
     kwargs: dict,
+    executor_obj: "Optional[Executor]" = None,
     backend: "Optional[SnapshotBackend]" = None,
     on_success: "Optional[Callable]" = None,
     logger: "Optional[TaskObserver]" = None,
     encryptor: Any = None,
     captured_ctx: Optional[contextvars.Context] = None,
-    semaphore: Optional[asyncio.Semaphore] = None,
-    sync_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None,
     running_tasks: Optional[dict] = None,
 ) -> Callable:
     """Wrap *func* into a zero-argument async callable for ``BackgroundTasks.add_task``.
@@ -516,16 +522,15 @@ def make_background_func(
         store: The in-memory task store.
         args: Positional arguments for *func* (empty when encryption is on).
         kwargs: Keyword arguments for *func* (empty when encryption is on).
+        executor_obj: Concrete executor that handles the actual function
+            dispatch. Passed through to :func:`execute_task`. ``None``
+            triggers the legacy implicit dispatch path.
         backend: Optional snapshot backend for idempotency.
         on_success: Optional callback invoked after SUCCESS.
         logger: Optional observer chain for structured event delivery.
         encryptor: Optional ``Fernet`` instance for decrypting args at run time.
         captured_ctx: Optional ``contextvars`` context snapshot from enqueue time
             for trace context propagation.
-        semaphore: Optional semaphore forwarded to :func:`execute_task` to cap
-            concurrent async task execution.
-        sync_executor: Optional thread pool forwarded to :func:`execute_task`
-            to isolate sync task threads from the default asyncio pool.
         running_tasks: Shared dict forwarded to :func:`execute_task` so the
             executor can register and deregister the inner task handle for
             cancellation support.
@@ -542,13 +547,12 @@ def make_background_func(
             store,
             args,
             kwargs,
+            executor_obj=executor_obj,
             backend=backend,
             on_success=on_success,
             logger=logger,
             encryptor=encryptor,
             captured_ctx=captured_ctx,
-            semaphore=semaphore,
-            sync_executor=sync_executor,
             running_tasks=running_tasks,
         )
 

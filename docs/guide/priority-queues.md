@@ -1,23 +1,39 @@
 # Priority Queues
 
-By default, tasks run in the order they are enqueued. Priority queues let you control execution order: higher-priority tasks run before lower-priority ones regardless of arrival order.
+This page shows you how to give time-sensitive tasks a head start so that a slow batch job never delays an OTP or payment confirmation.
+
+## Why priority matters
+
+Without priority, tasks run in arrival order. That is usually fine. It becomes a problem when a long batch job happens to be enqueued just before a user-facing task. The user waits for the batch job to start before their OTP goes out, even though the OTP takes a fraction of a second and the batch job takes minutes.
+
+Priority queues fix this by letting you express importance directly on the task. Higher-priority tasks always start before lower-priority ones, regardless of the order they arrived.
 
 ## How it works
 
-Tasks with a `priority` value bypass Starlette's background task list and enter a dedicated `asyncio.PriorityQueue`. A single worker coroutine drains the queue and dispatches each task via `asyncio.create_task`. The actual concurrency is then governed by the existing `max_concurrent_tasks` semaphore inside the executor.
+Tasks with a `priority` value skip Starlette's background task list and enter a dedicated `asyncio.PriorityQueue` instead. A single worker coroutine drains that queue and dispatches each task via `asyncio.create_task`. Higher integers run first. Tasks with the same priority number run in arrival order (FIFO).
 
-The priority queue is started by `TaskManager.startup()` and stopped cleanly by `TaskManager.shutdown()`. Any tasks still in the queue at shutdown remain as `PENDING` in the store and are handled by the existing interrupted-task and requeue mechanisms.
+The priority worker starts with `TaskManager.startup()` and shuts down cleanly with `TaskManager.shutdown()`. Any tasks still in the queue at shutdown remain as `PENDING` in the store and are picked up by the existing requeue mechanism.
 
-## Setting priority
+!!! note
+    Tasks without any `priority` value are not affected. They continue to run through the normal Starlette background task path, exactly as before.
 
-### Decorator-level default
+## Setting a priority on the decorator
 
-Set `priority` on `@task_manager.task()` to give all invocations of a function a fixed default:
+Add `priority=` to `@task_manager.task()` to give every call to that function a fixed default priority.
 
-```python
+```python hl_lines="9 14"
+from fastapi import Depends, FastAPI
+from fastapi_taskflow import ManagedBackgroundTasks, TaskAdmin, TaskManager
+
+task_manager = TaskManager(snapshot_db="tasks.db")
+app = FastAPI()
+TaskAdmin(app, task_manager)
+
+
 @task_manager.task(retries=2, priority=9)
 async def send_otp(phone: str) -> None:
     await sms_gateway.send(phone)
+
 
 @task_manager.task(priority=1)
 def generate_report(user_id: int) -> None:
@@ -26,81 +42,94 @@ def generate_report(user_id: int) -> None:
 
 Every `add_task(send_otp, ...)` call routes through the priority queue at priority 9. Every `add_task(generate_report, ...)` call routes at priority 1.
 
-### Per-call override
+## Overriding priority per call
 
-Override the decorator default for a single enqueue:
+Pass `priority=` directly to `add_task()` to override the decorator default for a single enqueue.
 
 ```python
 @app.post("/process")
-def process(
+async def process(
     item_id: int,
     rush: bool = False,
-    tasks=Depends(task_manager.get_tasks),
+    tasks: ManagedBackgroundTasks = Depends(task_manager.background_tasks),
 ):
     task_id = tasks.add_task(process_item, item_id, priority=10 if rush else None)
     return {"task_id": task_id}
 ```
 
-Per-call `priority` takes precedence over the decorator setting. Passing `priority=None` falls back to the decorator default. If both are `None`, the task routes through the normal Starlette mechanism with no priority.
+The per-call value takes precedence over the decorator setting. Passing `priority=None` falls back to whatever the decorator specifies. If both are `None`, the task uses the normal Starlette dispatch path with no priority.
 
-## Priority values
+## Choosing priority values
 
-Any integer is accepted. Higher integers run first. The conventional range is 1 (lowest) to 10 (highest), with 5 as a midpoint:
+Any integer works. The conventional range is 1 to 10, with 5 as a sensible midpoint.
 
-| Priority | Intended use |
-|----------|-------------|
-| 9-10 | User-facing, time-sensitive (OTP, payment confirmation) |
-| 6-8 | Important background work (webhook delivery, email) |
-| 4-5 | Routine background work (data sync, cache warm-up) |
-| 1-3 | Deferrable work (report generation, batch jobs) |
+| Priority | When to use it |
+|----------|----------------|
+| 9-10 | User-facing, time-sensitive tasks: OTP codes, payment confirmations |
+| 6-8 | Important background work: webhook delivery, transactional email |
+| 4-5 | Routine background work: data sync, cache warming |
+| 1-3 | Deferrable work: report generation, bulk exports, batch jobs |
 
-Tasks with the same priority execute in arrival order (FIFO).
+!!! tip
+    You do not need to use the full range. Picking three tiers (for example 9, 5, and 1) covers most applications clearly and makes it easy to reason about which tasks run first.
 
-## Dashboard
+## Mixing priority and normal tasks
 
-Priority is shown in the task table as a color-coded badge:
-
-- **Teal** — high priority (8-10)
-- **Amber** — medium priority (5-7)
-- **Gray** — low priority (1-4)
-
-The Priority column is sortable. Tasks without a priority value show a dash.
-
-## Normal tasks and priority tasks together
-
-Setting `priority` on only some tasks is fine. Normal tasks (no priority) continue to run via Starlette's background task list after the response is sent. Priority tasks run through the dedicated queue concurrently. There is no ordering relationship between the two dispatch paths.
+You can apply priority to some tasks while leaving others as normal background tasks. Both dispatch paths run concurrently and independently.
 
 ```python
 @task_manager.task(priority=8)
 async def send_confirmation(order_id: int) -> None:
-    ...
+    await email_service.send_confirmation(order_id)
+
 
 @task_manager.task()
 async def update_analytics(order_id: int) -> None:
-    ...
+    await analytics.record(order_id)
+
 
 @app.post("/order")
-def place_order(order_id: int, tasks=Depends(task_manager.get_tasks)):
-    conf_id      = tasks.add_task(send_confirmation, order_id)   # priority queue
-    analytics_id = tasks.add_task(update_analytics, order_id)    # Starlette list
+async def place_order(
+    order_id: int,
+    tasks: ManagedBackgroundTasks = Depends(task_manager.background_tasks),
+):
+    conf_id = tasks.add_task(send_confirmation, order_id)    # priority queue
+    analytics_id = tasks.add_task(update_analytics, order_id)  # Starlette list
     return {"confirmation_task": conf_id, "analytics_task": analytics_id}
 ```
 
+There is no ordering guarantee between the two dispatch paths. Priority only controls ordering within the priority queue itself.
+
 ## Interaction with eager dispatch
 
-When `priority` is set, the task is always routed through the priority queue. The `eager` setting is ignored. The priority worker dispatches tasks via `asyncio.create_task`, so they start quickly without waiting for a request to complete.
+When `priority` is set, the task always routes through the priority queue. The `eager` flag is ignored. The priority worker dispatches via `asyncio.create_task`, so tasks start quickly without needing to wait for the response to be sent.
 
 ## Interaction with concurrency controls
 
-The priority queue controls dispatch order, not concurrency. Once dispatched, each task enters the same `execute_task` path and is subject to the `max_concurrent_tasks` semaphore if one is configured. A high-priority task dispatched while the semaphore is full will wait for a slot, just like any other task.
+The priority queue controls *when* a task is dispatched, not how many run at once. Once dispatched, each task enters the normal execution path and is still subject to the `max_concurrent_tasks` semaphore if one is configured.
 
-## Example
+A high-priority task dispatched while the semaphore is full will wait for a slot, the same as any other task.
+
+!!! info
+    Think of priority and concurrency controls as two separate layers: priority decides the order tasks leave the queue, and `max_concurrent_tasks` decides how many can be executing at any given moment.
+
+## Dashboard
+
+Priority appears in the task table as a color-coded badge next to the function name.
+
+- **Teal** for high priority (8-10)
+- **Amber** for medium priority (5-7)
+- **Gray** for low priority (1-4)
+
+The Priority column is sortable. Tasks without a priority value show a dash.
+
+## Full example
 
 ```python
 from fastapi import Depends, FastAPI
 from fastapi_taskflow import ManagedBackgroundTasks, TaskAdmin, TaskManager
 
-task_manager = TaskManager()
+task_manager = TaskManager(snapshot_db="tasks.db")
 app = FastAPI()
 TaskAdmin(app, task_manager)
 
@@ -135,8 +164,8 @@ async def checkout(
     tasks: ManagedBackgroundTasks = Depends(task_manager.background_tasks),
 ):
     receipt_id = tasks.add_task(send_receipt, order_id)
-    report_id  = tasks.add_task(build_monthly_report, "2025-04")
-    # If all three tasks are queued simultaneously, the OTP runs first,
-    # then the receipt, then the report.
+    report_id = tasks.add_task(build_monthly_report, "2025-04")
+    # If both tasks are queued at once, the receipt (priority 5) runs
+    # before the report (priority 1).
     return {"receipt_task": receipt_id, "report_task": report_id}
 ```

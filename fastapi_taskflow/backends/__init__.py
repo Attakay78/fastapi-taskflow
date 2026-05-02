@@ -2,8 +2,10 @@
 
 Built-in backends:
 
-* :class:`SqliteBackend` -- zero-dependency, local SQLite file (default)
-* :class:`RedisBackend`  -- shared Redis store; requires ``pip install "redis[asyncio]"``
+* :class:`SqliteBackend`   -- zero-dependency, local SQLite file (default)
+* :class:`RedisBackend`    -- shared Redis store; requires ``pip install "fastapi-taskflow[redis]"``
+* :class:`PostgresBackend` -- PostgreSQL; requires ``pip install "fastapi-taskflow[postgres]"``
+* :class:`MySQLBackend`    -- MySQL/MariaDB; requires ``pip install "fastapi-taskflow[mysql]"``
 
 To write a custom backend, subclass :class:`SnapshotBackend` and implement
 its abstract methods::
@@ -23,7 +25,15 @@ its abstract methods::
 """
 
 from .base import SnapshotBackend
+from .mysql import MySQLBackend
+from .postgres import PostgresBackend
 from .redis import RedisBackend
 from .sqlite import SqliteBackend
 
-__all__ = ["SnapshotBackend", "SqliteBackend", "RedisBackend"]
+__all__ = [
+    "SnapshotBackend",
+    "SqliteBackend",
+    "RedisBackend",
+    "PostgresBackend",
+    "MySQLBackend",
+]

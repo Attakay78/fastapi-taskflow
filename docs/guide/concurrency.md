@@ -1,18 +1,27 @@
 # Concurrency Controls
 
-By default, fastapi-taskflow shares the event loop and thread pool with FastAPI request handlers. For most use cases this works fine. Under burst task load it can affect request latency.
-
-Two opt-in parameters let you control this. Neither changes existing behaviour when not set.
+This page explains how to stop background tasks from competing with your request handlers under burst load, and how to run CPU-bound tasks in separate OS processes.
 
 ## The default behaviour
 
-**Async tasks** run as coroutines on the main event loop alongside request handlers. When many async tasks are active simultaneously, they compete with request handlers for scheduling time. Each task yields at every `await`, so requests still get scheduled, but P99 latency can climb under high task concurrency.
+By default, fastapi-taskflow shares the event loop and the default thread pool with FastAPI itself. For most applications this is perfectly fine. The event loop schedules everything cooperatively, and there is no conflict.
 
-**Sync tasks** are offloaded via `asyncio.to_thread`, which submits them to the default `ThreadPoolExecutor`. That is the same pool FastAPI uses for sync route handlers. A burst of sync tasks can exhaust available threads, causing sync request handlers to queue behind them.
+Problems appear when many tasks are enqueued at once.
+
+Imagine 50 tasks arrive at the same time, each making several network calls. All 50 start immediately, flooding the event loop with coroutines. Your request handlers are coroutines on that same loop. They still get scheduled at each `await` boundary, but P99 latency climbs because there are now 50 competitors for every scheduling slot.
+
+Sync tasks make this even more concrete. FastAPI runs sync route handlers in a `ThreadPoolExecutor`. So does asyncio's `to_thread`. If 50 sync tasks fill every thread in that shared pool, the next sync request handler has to wait in line behind them.
+
+Neither of these is a bug. They are the natural result of sharing resources. The settings below let you opt out of that sharing.
+
+!!! note
+    `max_concurrent_tasks` and `max_sync_threads` both default to `None`. If you do not set them, nothing changes from the default FastAPI behaviour.
 
 ## `max_concurrent_tasks`
 
-Caps how many async tasks run concurrently on the event loop using an `asyncio.Semaphore`.
+This setting caps how many async tasks can run at the same time using an `asyncio.Semaphore`. Tasks that arrive when the cap is reached wait for a slot before starting.
+
+While they wait, they are parked and consume no event loop time. Your request handlers continue to get consistent scheduling access regardless of how many tasks are queued behind the semaphore.
 
 ```python
 from fastapi_taskflow import TaskManager
@@ -23,15 +32,14 @@ task_manager = TaskManager(
 )
 ```
 
-When 10 tasks are already running, any new task waits for a slot before starting. Waiting tasks are parked without consuming event loop time, so request handlers always have consistent scheduling access regardless of task volume.
+Once a task acquires its slot and starts, it runs at full speed. The semaphore only controls entry, not execution pace.
 
-Tasks do not slow down once they start. They only wait before starting if the limit is reached.
-
-**When to set this:** if you see elevated request latency during periods of high task activity. A value of 10 is a reasonable starting point for IO-bound tasks. Raise it if tasks queue up unnecessarily on idle systems.
+!!! tip
+    Start with a value of 10 for IO-bound tasks. If tasks are queuing up on an otherwise idle system, raise the value. If request latency is still elevated under load, lower it.
 
 ## `max_sync_threads`
 
-Runs sync task functions in a dedicated `ThreadPoolExecutor` instead of the default asyncio pool.
+Sync task functions run in a thread pool via `asyncio.to_thread`. By default that is the same pool asyncio uses for everything else, including sync FastAPI route handlers. Setting `max_sync_threads` creates a dedicated `ThreadPoolExecutor` exclusively for sync tasks.
 
 ```python
 from fastapi_taskflow import TaskManager
@@ -42,13 +50,16 @@ task_manager = TaskManager(
 )
 ```
 
-Tasks and request handlers now have separate thread pools. A burst of sync tasks can exhaust the task pool entirely without affecting the threads available to sync request handlers.
+With a dedicated pool, a burst of sync tasks can fill their own pool entirely without touching the threads available to your sync request handlers. The two workloads no longer interfere with each other.
 
-**When to set this:** if you run sync task functions and see request latency increase when many tasks are active. Set it to `os.cpu_count() + 4` for IO-bound sync tasks, or closer to `os.cpu_count()` for CPU-bound ones.
+!!! tip
+    For IO-bound sync tasks, `os.cpu_count() + 4` is a reasonable starting point. For CPU-bound sync tasks, stay closer to `os.cpu_count()` to avoid over-scheduling on the available cores.
 
 ## Using both together
 
-```python
+The two settings are independent and compose naturally.
+
+```python hl_lines="6 7"
 import os
 from fastapi_taskflow import TaskManager
 
@@ -59,9 +70,33 @@ task_manager = TaskManager(
 )
 ```
 
-Async tasks are capped at 10 concurrent. Sync tasks run in their own pool. Request handlers are unaffected by task load in both cases.
+Async tasks are capped at 10 concurrent. Sync tasks run in their own pool and never compete with request handlers for threads. Both limits operate simultaneously without interfering with each other.
 
-## What these controls do not solve
+## CPU-bound tasks
 
-- **CPU-bound tasks** that saturate a core will still affect other work sharing that core. A dedicated thread pool helps parallelise across cores but does not remove the CPU contention. If your tasks are CPU-bound and high-volume, a separate worker process is the right answer.
-- **Very long-running async tasks** that never yield will block the event loop regardless of the semaphore. Tasks should `await` regularly or delegate CPU work to a thread.
+Thread-based concurrency does not help with CPU-bound work. Python threads share the GIL, so only one thread executes Python bytecode at a time. A task that saturates a CPU core for several seconds will still affect other tasks sharing that core, regardless of how many threads you allocate.
+
+For CPU-bound tasks, use `executor='process'`:
+
+```python
+@task_manager.task(executor="process")
+def generate_report(report_id: int) -> bytes:
+    return render_pdf(report_id)
+```
+
+Process tasks run in a separate `ProcessPoolExecutor` using the `spawn` start method. Each worker is an independent Python interpreter, so the GIL is not a factor and workers run in true parallel on separate cores.
+
+```python
+import os
+from fastapi_taskflow import TaskManager
+
+task_manager = TaskManager(
+    max_process_workers=os.cpu_count(),
+    process_shutdown_timeout=60.0,
+)
+```
+
+See [Process Executor](process-tasks.md) for the full guide, including constraints and configuration.
+
+!!! note
+    There is one remaining edge case for async tasks: a coroutine that never yields will block the event loop for as long as it runs, regardless of the semaphore. Tasks should `await` regularly, or delegate any CPU-heavy work to a thread or process.

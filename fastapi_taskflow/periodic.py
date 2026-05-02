@@ -271,16 +271,18 @@ class PeriodicScheduler:
         backend = scheduler._backend if scheduler is not None else None
         on_success = scheduler.flush_one if scheduler is not None else None
 
+        from .executor import execute_task
+
+        executor_obj = self._task_manager._resolve_executor(entry.func, entry.config)
+
         self._task_manager.store.create(
             task_id,
             entry.func.__name__,
             (),
             {},
             source="scheduled",
+            executor=executor_obj.name,
         )
-
-        from .executor import execute_task
-
         asyncio.create_task(
             execute_task(
                 entry.func,
@@ -289,12 +291,12 @@ class PeriodicScheduler:
                 self._task_manager.store,
                 (),
                 {},
+                executor_obj=executor_obj,
                 backend=backend,
                 on_success=on_success,
                 logger=self._task_manager.logger,
                 encryptor=self._task_manager.fernet,
-                semaphore=self._task_manager._task_semaphore,
-                sync_executor=self._task_manager._sync_executor,
+                running_tasks=self._task_manager._running_tasks,
             )
         )
 

@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.8.0
+
+Adds a process executor for CPU-bound tasks, PostgreSQL and MySQL snapshot backends, readable duration formatting in the dashboard, and bug fixes.
+
+### Process executor
+
+- Added `executor='process'` on `@task_manager.task()` and `@task_manager.schedule()`. Tasks marked with it run in a separate OS process via `ProcessPoolExecutor`, bypassing the GIL for true CPU parallelism.
+- `max_process_workers` and `process_shutdown_timeout` on `TaskManager` configure pool size and graceful shutdown wait.
+- cloudpickle is used automatically when installed (`pip install "fastapi-taskflow[process]"`), enabling lambdas and closures as task arguments. Falls back to standard pickle without it.
+- `TaskArgumentError` is raised at `add_task()` time when arguments cannot be serialized, rather than failing silently inside the worker.
+- `TaskRecord` now carries an `executor` field recording which executor ran the task (`async`, `thread`, or `process`). Shown in the dashboard detail panel with a color-coded badge.
+
+### PostgreSQL and MySQL backends
+
+- Added `PostgresBackend` for PostgreSQL. Install with `pip install "fastapi-taskflow[postgres]"`.
+- Added `MySQLBackend` for MySQL and MariaDB. Install with `pip install "fastapi-taskflow[mysql]"`.
+- Both backends support the full feature set: task history, pending requeue, idempotency keys, scheduled task locking, and multi-instance deployments.
+- Tables are created automatically on first startup. No migrations to run.
+- Both are included in `pip install "fastapi-taskflow[all]"`.
+
+### Dashboard improvements
+
+- Duration values now display in a readable format. Values under 1 second show as `ms`, above that as seconds, then `Xm Xs` for minutes, and `Xh Xm` for hours. Applies to the task table, detail panel, and all stat cards (Avg, Min, Max, P95).
+- Task logs in the detail panel no longer scroll inside a fixed-height box. They expand with the panel.
+- Error and stacktrace sections in the detail panel also expand fully instead of clipping.
+
+### Bug fixes
+
+- Fixed select-all checkbox on the main tasks table incorrectly picking up Dead Letters tab checkboxes, causing `POST /tasks/undefined/retry` 404 errors when retrying selected tasks.
+
+---
+
 ## v0.7.0
 
 Adds priority queues, eager dispatch, and Dead Letter Queue bulk replay.

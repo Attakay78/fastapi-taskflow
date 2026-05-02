@@ -1,5 +1,7 @@
 import asyncio
 import contextvars
+import inspect
+import logging
 import pickle
 import uuid
 from typing import Any, Callable, Optional
@@ -9,6 +11,8 @@ from fastapi import BackgroundTasks
 from .executor import make_background_func
 from .manager import TaskManager
 from .models import TaskConfig
+
+logger = logging.getLogger(__name__)
 
 
 class ManagedBackgroundTasks(BackgroundTasks):
@@ -82,7 +86,9 @@ class ManagedBackgroundTasks(BackgroundTasks):
                 task, allowing observers to slice metrics or logs by label.
             eager: When ``True``, dispatch via ``asyncio.create_task`` immediately
                 rather than waiting for the response to be sent. Overrides the
-                decorator-level ``eager`` setting for this call only.
+                decorator-level ``eager`` setting for this call only. Note: eager
+                dispatch is incompatible with ``executor='process'``; when both
+                are set a warning is logged and the task runs in-process instead.
             priority: Execution priority. Higher values run before lower ones.
                 Routes the task through the dedicated priority queue instead of
                 Starlette's background task list. Overrides the decorator-level
@@ -92,6 +98,11 @@ class ManagedBackgroundTasks(BackgroundTasks):
 
         Returns:
             The ``task_id`` of the enqueued (or already-existing) task.
+
+        Raises:
+            TaskArgumentError: When *func* is registered with
+                ``executor='process'`` and any argument in *args* or *kwargs*
+                is not picklable. The error is raised before the task is stored.
         """
         # In-process dedup: check the in-memory store first (fast, no I/O).
         if idempotency_key is not None:
@@ -107,6 +118,29 @@ class ManagedBackgroundTasks(BackgroundTasks):
             priority if priority is not None else config.priority
         )
         run_eager: bool = eager if eager is not None else config.eager
+
+        # Resolve the executor that will run this task.
+        executor_obj = self._task_manager._resolve_executor(func, config)
+
+        # Eager dispatch is incompatible with the process executor because the
+        # pool is designed for background use after the response is sent. When
+        # both are active, fall back to the natural in-process executor and log
+        # a warning so the developer is aware.
+        if run_eager and executor_obj.name == "process":
+            logger.warning(
+                "fastapi-taskflow: task %r uses executor='process' but eager=True "
+                "is also set. Process executor is bypassed for eager dispatch; "
+                "the task will run in-process instead. Use the standard (non-eager) "
+                "dispatch path for process executor tasks.",
+                func.__name__,
+            )
+            fallback_name = "async" if inspect.iscoroutinefunction(func) else "thread"
+            executor_obj = self._task_manager._executors[fallback_name]
+
+        # Validate arguments for executors that have per-enqueue constraints
+        # (currently only the process executor, which requires picklable args).
+        # This converts a cryptic worker crash into a clear API error at the call site.
+        executor_obj.validate_args(args, kwargs)
 
         # Capture the caller's contextvars context for trace context propagation.
         # This snapshot is taken here (in the request handler) so OTel spans and
@@ -133,6 +167,7 @@ class ManagedBackgroundTasks(BackgroundTasks):
             tags=tags,
             encrypted_payload=encrypted_payload,
             priority=run_priority,
+            executor=executor_obj.name,
         )
 
         scheduler = self._task_manager._scheduler
@@ -146,19 +181,18 @@ class ManagedBackgroundTasks(BackgroundTasks):
             self._task_manager.store,
             store_args,
             store_kwargs,
+            executor_obj=executor_obj,
             backend=backend,
             on_success=on_success,
             logger=self._task_manager.logger,
             encryptor=fernet,
             captured_ctx=captured_ctx,
-            semaphore=self._task_manager._task_semaphore,
-            sync_executor=self._task_manager._sync_executor,
             running_tasks=self._task_manager._running_tasks,
         )
 
         if run_priority is not None:
             # Priority queue: the worker coroutine dispatches tasks in priority
-            # order. Eager is ignored when priority is set — the queue provides
+            # order. Eager is ignored when priority is set -- the queue provides
             # its own non-blocking dispatch path.
             self._task_manager.enqueue_priority(task_id, run_priority, wrapped)
         elif run_eager:

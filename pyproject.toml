@@ -1,7 +1,7 @@
 [project]
 name = "fastapi-taskflow"
-version = "0.7.0"
-description = "Turn FastAPI BackgroundTasks into a production-ready task system. Retries, control, resiliency and visibility without workers or brokers."
+version = "0.8.0"
+description = "Retries, persistence, and visibility for FastAPI's BackgroundTasks. Production-grade background tasks. No workers, no brokers, drop-in."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -25,16 +25,28 @@ dependencies = [
 redis = [
     "redis[asyncio]>=5.0",
 ]
+postgres = [
+    "psycopg2-binary>=2.9",
+]
+mysql = [
+    "PyMySQL>=1.1",
+]
 scheduler = [
     "croniter>=1.4",
 ]
 encryption = [
     "cryptography>=41.0",
 ]
+process = [
+    "cloudpickle>=3.0",
+]
 all = [
     "redis[asyncio]>=5.0",
+    "psycopg2-binary>=2.9",
+    "PyMySQL>=1.1",
     "croniter>=1.4",
     "cryptography>=41.0",
+    "cloudpickle>=3.0",
 ]
 dev = [
     "pytest>=7.0",
@@ -49,6 +61,7 @@ docs = [
 
 [tool.uv]
 dev-dependencies = [
+    "cloudpickle>=3.0",
     "croniter>=1.4",
     "cryptography>=41.0",
     "httpx>=0.28.1",

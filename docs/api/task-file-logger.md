@@ -1,10 +1,16 @@
-# Loggers
+# Loggers and Observers
+
+This page documents the built-in observer implementations, the `TaskObserver` ABC, and the event types delivered to observers.
 
 fastapi-taskflow ships three built-in observer implementations. All implement the `TaskObserver` ABC and can be combined in any order via the `loggers=` parameter on `TaskManager`.
 
+> **Guide:** [Observability](../guide/observability.md) covers observer configuration, combining loggers, and writing custom observers.
+
+---
+
 ## FileLogger
 
-Writes log and lifecycle events to a rotating plain text file.
+`FileLogger` writes log and lifecycle events to a plain text file with automatic rotation.
 
 ```python
 from fastapi_taskflow import FileLogger
@@ -25,36 +31,46 @@ FileLogger(
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `path` | `str` | required | File path to write to. Created if it does not exist. |
-| `max_bytes` | `int` | `10485760` | Maximum file size (10 MB) before rotating. Ignored in `watched` mode. |
-| `backup_count` | `int` | `5` | Number of rotated backup files to keep. Ignored in `watched` mode. |
-| `mode` | `str` | `"rotate"` | `"rotate"` uses `RotatingFileHandler` (single process). `"watched"` uses `WatchedFileHandler` (multi-process with external rotation). |
-| `log_lifecycle` | `bool` | `False` | Also write lifecycle transitions (`RUNNING`, `SUCCESS`, `FAILED`, `INTERRUPTED`). |
-| `min_level` | `str` | `"info"` | Minimum log level to write. Entries below this level are dropped. |
+| `path` | `str` | required | File path to write to. The file is created if it does not exist. |
+| `max_bytes` | `int` | `10485760` | Maximum file size (10 MB) before rotating to a new file. Has no effect in `"watched"` mode. |
+| `backup_count` | `int` | `5` | Number of rotated backup files to keep alongside the active log file. Has no effect in `"watched"` mode. |
+| `mode` | `str` | `"rotate"` | `"rotate"` uses Python's `RotatingFileHandler`, suitable for single-process deployments. `"watched"` uses `WatchedFileHandler`, suitable for multi-process deployments where an external tool such as logrotate manages rotation. |
+| `log_lifecycle` | `bool` | `False` | When `True`, also write lifecycle transitions (`RUNNING`, `SUCCESS`, `FAILED`, `INTERRUPTED`) to the file in addition to `task_log()` entries. |
+| `min_level` | `str` | `"info"` | Minimum log level to write. Entries below this level are silently dropped. Accepts `"debug"`, `"info"`, `"warning"`, or `"error"`. |
 
 ### Output format
 
-Log entry:
+Log entry (from `task_log()`):
+
 ```
-[abc12345] [send_email] 2026-01-01T12:00:00 Sending to user@example.com
+[abc12345] [send_email] 2026-04-30T12:00:00 Sending to user@example.com
 ```
 
 Lifecycle entry (when `log_lifecycle=True`):
+
 ```
-[abc12345] [send_email] 2026-01-01T12:00:01 -- SUCCESS
+[abc12345] [send_email] 2026-04-30T12:00:01 -- SUCCESS
 ```
 
 ### Thread safety
 
-A single `FileLogger` instance is safe for concurrent use across multiple threads (sync tasks run in a thread pool) and the asyncio event loop within one process.
+A single `FileLogger` instance is safe for concurrent use across multiple threads (sync tasks run in a thread pool) and the asyncio event loop within one process. For multi-process or multi-host deployments, see the [File Logging guide](../guide/file-logging.md).
 
-For multi-process or multi-host deployments see [File Logging](../guide/file-logging.md).
+**Example:**
+
+```python
+from fastapi_taskflow import TaskManager, FileLogger
+
+task_manager = TaskManager(
+    loggers=[FileLogger("tasks.log", log_lifecycle=True, min_level="debug")],
+)
+```
 
 ---
 
 ## StdoutLogger
 
-Prints log and lifecycle events to stdout. Useful in containers where stdout is captured by the logging agent.
+`StdoutLogger` prints log and lifecycle events to stdout. Useful in containers where stdout is captured by the logging agent.
 
 ```python
 from fastapi_taskflow import StdoutLogger
@@ -71,21 +87,32 @@ StdoutLogger(
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `log_lifecycle` | `bool` | `False` | Also print lifecycle transitions. |
-| `min_level` | `str` | `"info"` | Minimum log level to print. |
+| `log_lifecycle` | `bool` | `False` | When `True`, also print lifecycle transitions in addition to `task_log()` entries. |
+| `min_level` | `str` | `"info"` | Minimum log level to print. Entries below this level are silently dropped. |
 
 ### Output format
 
-Matches `FileLogger`:
+Output matches `FileLogger`:
+
 ```
-[abc12345] [send_email] 2026-01-01T12:00:00 Sending to user@example.com
+[abc12345] [send_email] 2026-04-30T12:00:00 Sending to user@example.com
+```
+
+**Example:**
+
+```python
+from fastapi_taskflow import TaskManager, StdoutLogger
+
+task_manager = TaskManager(
+    loggers=[StdoutLogger(log_lifecycle=True)],
+)
 ```
 
 ---
 
 ## InMemoryLogger
 
-Captures events in memory. Designed for tests.
+`InMemoryLogger` captures events in memory. It is designed for use in tests where you want to assert on log output and lifecycle transitions without writing to disk or stdout.
 
 ```python
 from fastapi_taskflow import InMemoryLogger
@@ -101,94 +128,177 @@ InMemoryLogger(
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `min_level` | `str` | `"debug"` | Minimum log level to capture. Default captures all levels. |
+| `min_level` | `str` | `"debug"` | Minimum log level to capture. The default captures all levels. |
 
 ### Attributes
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `log_events` | `list[LogEvent]` | All captured log events in order. |
-| `lifecycle_events` | `list[LifecycleEvent]` | All captured lifecycle events in order. |
+| `log_events` | `list[LogEvent]` | All captured log events in order, each emitted by a `task_log()` call. |
+| `lifecycle_events` | `list[LifecycleEvent]` | All captured lifecycle transition events in order. |
 
 ### Methods
 
-| Method | Description |
-|--------|-------------|
-| `clear()` | Empty both event lists. |
+#### `clear() -> None`
 
-### Example
+Empties both `log_events` and `lifecycle_events`. Call this between test cases to reset state.
+
+**Example:**
 
 ```python
-from fastapi_taskflow import InMemoryLogger, TaskManager
-from fastapi_taskflow.executor import execute_task
-from fastapi_taskflow.models import TaskConfig
-from fastapi_taskflow.store import TaskStore
+from fastapi_taskflow import InMemoryLogger, TaskManager, task_log
 
 mem = InMemoryLogger()
-tm = TaskManager(loggers=[mem])
+task_manager = TaskManager(loggers=[mem])
 
-@tm.task()
+@task_manager.task()
 def my_task() -> None:
     task_log("hello")
 
-store = TaskStore()
-store.create("t1", "my_task", (), {})
-
-import asyncio
-asyncio.run(execute_task(my_task, "t1", TaskConfig(), store, (), {}, logger=tm.logger))
+# ... run the task in a test ...
 
 assert mem.log_events[0].message == "hello"
 assert mem.lifecycle_events[-1].status.value == "success"
+
+mem.clear()
+assert len(mem.log_events) == 0
 ```
 
 ---
 
 ## TaskObserver ABC
 
-Implement this to create a custom observer.
+`TaskObserver` is the base class for all custom observers. Subclass it and implement `on_log()` and/or `on_lifecycle()` to send task events to any destination, such as a file, a metrics system, or a tracing backend.
 
 ```python
 from fastapi_taskflow import TaskObserver
-from fastapi_taskflow.loggers.base import LifecycleEvent, LogEvent
-
-
-class MyObserver(TaskObserver):
-    async def on_log(self, event: LogEvent) -> None:
-        ...
-
-    async def on_lifecycle(self, event: LifecycleEvent) -> None:
-        ...
-
-    async def startup(self) -> None:
-        ...  # called when TaskAdmin mounts the app
-
-    async def close(self) -> None:
-        ...  # called on app shutdown
+from fastapi_taskflow.loggers.base import LogEvent, LifecycleEvent
 ```
 
-`startup()` and `close()` default to no-ops in the base class. Override only what you need.
+```python
+class TaskObserver(ABC):
+    def __init__(self, min_level: str = "info") -> None: ...
+
+    async def on_log(self, event: LogEvent) -> None: ...
+    async def on_lifecycle(self, event: LifecycleEvent) -> None: ...
+    async def startup(self) -> None: ...
+    async def close(self) -> None: ...
+```
+
+### Methods to implement
+
+#### `on_log(event: LogEvent) -> None`
+
+Called for every `task_log()` entry emitted by a running task. The base class implementation is a no-op; override it to process log entries.
+
+#### `on_lifecycle(event: LifecycleEvent) -> None`
+
+Called on every task status transition: `RUNNING`, `SUCCESS`, `FAILED`, and `INTERRUPTED`. The base class implementation is a no-op; override it to process lifecycle events.
+
+Both methods are `async`, so implementations can `await` network calls, database writes, or any other async I/O. Sync-only destinations can use `asyncio.to_thread` inside the method body.
+
+Errors raised inside either method are caught by `LoggerChain` and logged to stderr. They never propagate to the task or affect its outcome.
+
+### Optional methods
+
+#### `startup() -> None`
+
+Called at app startup before any tasks run. Use this to open connections or initialise exporters. Defaults to a no-op; override only if needed.
+
+#### `close() -> None`
+
+Called at app shutdown. Use this to flush buffered events and release held resources. Defaults to a no-op; override only if needed.
+
+**Example custom observer:**
+
+```python
+from fastapi_taskflow import TaskObserver
+from fastapi_taskflow.loggers.base import LifecycleEvent
+
+class PrometheusObserver(TaskObserver):
+    async def on_lifecycle(self, event: LifecycleEvent) -> None:
+        TASK_COUNTER.labels(
+            func=event.func_name,
+            status=event.status.value,
+        ).inc()
+```
 
 ---
 
-## LoggerChain
+## LogEvent
 
-`LoggerChain` fans out to multiple observers. It is created internally by `TaskManager` when `loggers=` is set. You do not normally need to instantiate it directly.
+`LogEvent` carries a single structured log entry from `task_log()` to each observer.
 
 ```python
-from fastapi_taskflow import LoggerChain, FileLogger, StdoutLogger
-
-chain = LoggerChain([
-    FileLogger("tasks.log"),
-    StdoutLogger(),
-])
+from fastapi_taskflow.loggers.base import LogEvent
 ```
 
-Observers run sequentially. An exception in one observer is caught and logged at `ERROR` level; it does not affect subsequent observers or the task itself.
+```python
+@dataclass
+class LogEvent:
+    task_id:   str
+    func_name: str
+    message:   str
+    level:     str
+    timestamp: datetime
+    attempt:   int
+    tags:      dict[str, str]
+    extra:     dict[str, Any]
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `task_id` | `str` | UUID of the task that emitted this entry. |
+| `func_name` | `str` | Name of the task function. |
+| `message` | `str` | The log message, prefixed with a UTC timestamp in `YYYY-MM-DDTHH:MM:SS` format. |
+| `level` | `str` | Severity: `"debug"`, `"info"`, `"warning"`, or `"error"`. |
+| `timestamp` | `datetime` | UTC datetime when the entry was created. |
+| `attempt` | `int` | Zero-based retry index. `0` means the first run. |
+| `tags` | `dict[str, str]` | Key/value labels attached to the task at enqueue time. |
+| `extra` | `dict[str, Any]` | Arbitrary structured data passed as keyword arguments to `task_log()`. |
+
+---
+
+## LifecycleEvent
+
+`LifecycleEvent` carries a task status transition to each observer. Emitted on every state change: `RUNNING`, `SUCCESS`, `FAILED`, and `INTERRUPTED`.
+
+```python
+from fastapi_taskflow.loggers.base import LifecycleEvent
+```
+
+```python
+@dataclass
+class LifecycleEvent:
+    task_id:      str
+    func_name:    str
+    status:       TaskStatus
+    timestamp:    datetime
+    attempt:      int
+    retries_used: int
+    duration:     float | None
+    error:        str | None
+    stacktrace:   str | None
+    tags:         dict[str, str]
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `task_id` | `str` | UUID of the task. |
+| `func_name` | `str` | Name of the task function. |
+| `status` | `TaskStatus` | The new status value after this transition. |
+| `timestamp` | `datetime` | UTC datetime when the transition occurred. |
+| `attempt` | `int` | Zero-based retry index at the time of the transition. |
+| `retries_used` | `int` | Total retry attempts consumed so far. |
+| `duration` | `float \| None` | Elapsed seconds from `start_time` to this transition. `None` on the `RUNNING` transition. |
+| `error` | `str \| None` | String form of the last exception. Set only on `FAILED`; `None` otherwise. |
+| `stacktrace` | `str \| None` | Full traceback of the last exception. Set only on `FAILED`; `None` otherwise. |
+| `tags` | `dict[str, str]` | Key/value labels attached to the task at enqueue time. |
 
 ---
 
 ## See also
 
-- [Observability guide](../guide/observability.md)
-- [File Logging](../guide/file-logging.md)
-- [task_log](task-log.md)
+- [task_log](task-log.md) for the function that produces `LogEvent` instances
+- [Observability guide](../guide/observability.md) for combining observers and filtering by level
+- [File Logging guide](../guide/file-logging.md) for multi-process rotation patterns

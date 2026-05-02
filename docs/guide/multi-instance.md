@@ -1,33 +1,43 @@
 # Multi-Instance Deployments
 
-fastapi-taskflow supports running multiple instances of your application behind a load balancer. The level of coordination available depends on which backend you use.
+This page covers the two main ways to run fastapi-taskflow with multiple instances, how task history is shared between them, and how to configure your load balancer so the dashboard works correctly.
 
-## Same host, multiple processes
+## Two deployment topologies
 
-Use SQLite when all instances share the same host (for example, multiple Uvicorn workers started by Gunicorn).
+How you configure fastapi-taskflow depends on where your instances run.
 
-```python
+**Same host, multiple processes** applies when you run Gunicorn with multiple Uvicorn workers on a single machine. All processes share the same filesystem, so SQLite is a practical choice.
+
+**Multiple hosts** applies when instances run on separate machines (different VMs, containers in a Kubernetes cluster, etc.). Each machine has its own filesystem, so you need a shared network backend like Redis.
+
+## Same host with SQLite
+
+Point every worker at the same database file:
+
+```python hl_lines="4 5"
+from fastapi_taskflow import TaskManager
+
 task_manager = TaskManager(
     snapshot_db="/var/app/tasks.db",
     requeue_pending=True,
 )
 ```
 
-All processes must point to the same file path. WAL journal mode is enabled automatically so concurrent reads and writes do not conflict.
+WAL journal mode is enabled automatically so concurrent reads and writes do not conflict. Atomic requeue claiming ensures only one process picks up each pending task on startup.
 
-Atomic requeue claiming ensures only one process picks up each pending task on startup.
+!!! warning
+    SQLite only works when all instances share the same host filesystem. If you deploy to separate machines, each instance would have its own separate database file and the instances would not see each other's tasks.
 
-This does not work across separate machines. Each machine would have its own file.
+## Multiple hosts with Redis
 
-## Multiple hosts (Redis)
-
-Use Redis when instances run on separate machines.
+Install the Redis extra and point every instance at a shared Redis server:
 
 ```bash
 pip install "fastapi-taskflow[redis]"
 ```
 
-```python
+```python hl_lines="5 6"
+from fastapi_taskflow import TaskManager
 from fastapi_taskflow.backends import RedisBackend
 
 task_manager = TaskManager(
@@ -36,37 +46,36 @@ task_manager = TaskManager(
 )
 ```
 
-All instances share the same Redis instance. The following features work across hosts:
+All instances share the same Redis backend. The following features work across hosts:
 
-- Atomic requeue claiming: only one instance picks up each pending task on restart
-- Idempotency keys: cross-instance deduplication using Redis `SET NX`
-- Completed task history: all instances flush to the same Redis keys
-- Dashboard history view: completed tasks from all instances visible with a short cache window
+- **Atomic requeue claiming**: only one instance picks up each pending task on restart.
+- **Idempotency keys**: cross-instance deduplication using Redis `SET NX`.
+- **Completed task history**: all instances flush finished tasks to the same Redis keys.
+- **Dashboard history view**: completed tasks from all instances are visible with a short cache window.
 
-## Idempotency keys
+## How task history is shared
 
-Pass an `idempotency_key` to `add_task()` to prevent the same logical operation from running twice, even if two separate instances receive the same request simultaneously.
+Completed tasks (SUCCESS, FAILED, INTERRUPTED) are flushed to the shared backend. Any instance can read them back and show them in its dashboard history view.
 
-```python
-task_id = tasks.add_task(
-    notify_order,
-    order_id,
-    idempotency_key=f"order-{order_id}-notified",
-)
-```
+Live tasks (PENDING, RUNNING) are held in each instance's in-memory store. They are not pushed to the shared backend until they complete, so other instances cannot see them in real time.
 
-If an instance has already completed this operation, the original `task_id` is returned and the task is not enqueued again.
+## Dashboard behaviour in multi-instance deployments
 
-!!! note
-    Idempotency key cross-instance dedup only works when a shared backend is configured. Without a backend, dedup is in-process only.
+The dashboard SSE stream connects to a single instance. That instance shows:
 
-## Dashboard in multi-instance deployments
-
-The dashboard SSE stream is connected to a single instance. That instance shows its own live tasks (PENDING, RUNNING) and completed tasks from all instances via the shared backend.
+- Its own live tasks (PENDING, RUNNING) from local memory.
+- Completed tasks from all instances, loaded from the shared backend.
 
 The poll interval controls how often the stream refreshes from the backend to pick up other instances' completed tasks:
 
 ```python
+from fastapi_taskflow import TaskAdmin, TaskManager
+
+task_manager = TaskManager(
+    snapshot_backend=RedisBackend("redis://your-redis-host:6379/0"),
+)
+app = FastAPI()
+
 TaskAdmin(app, task_manager, poll_interval=5.0)
 ```
 
@@ -74,11 +83,19 @@ Live PENDING and RUNNING tasks from other instances are not visible. Each instan
 
 To get a consistent view of live tasks, route all dashboard traffic to a single instance using sticky sessions at the load balancer.
 
-## Sticky sessions for the dashboard
+## Why sticky sessions are needed
 
-### Nginx
+The dashboard uses Server-Sent Events (SSE), which is a persistent HTTP connection. Once the browser opens an SSE connection to an instance, it stays connected to that instance for the lifetime of the page.
 
-Route all `/tasks/` traffic to a dedicated instance while the rest of the application is load balanced normally.
+If the load balancer routes the initial page load to instance A but then routes the SSE connection to instance B, the dashboard will show instance B's tasks, which may be different from what the page expects.
+
+Sticky sessions fix this by ensuring both the page load and the SSE connection always reach the same instance.
+
+## Sticky session configuration
+
+### Nginx: dedicated instance for the dashboard
+
+Route all `/tasks/` traffic to a fixed instance while the rest of the application is load balanced normally:
 
 ```nginx
 upstream app {
@@ -104,7 +121,7 @@ server {
         proxy_set_header X-Accel-Buffering no;
 
         # Increase timeout so Nginx does not close the SSE connection early.
-        # The default is 60s which will drop the stream between keep-alive pings.
+        # The default 60s will drop the stream between keep-alive pings.
         proxy_read_timeout 3600s;
     }
 
@@ -119,7 +136,7 @@ server {
 
 ### Nginx with ip_hash
 
-If you cannot dedicate a fixed instance to the dashboard, `ip_hash` routes the same client IP to the same upstream on every request.
+If you cannot dedicate a fixed instance to the dashboard, `ip_hash` routes the same client IP to the same upstream on every request:
 
 ```nginx
 upstream app {
@@ -147,11 +164,11 @@ server {
 ```
 
 !!! warning
-    `ip_hash` has two drawbacks. First, it does not rebalance well when instances are added or removed. Second, users behind a corporate NAT or shared proxy all share the same source IP and will all land on the same instance, which defeats the load balancing for those users.
+    `ip_hash` does not rebalance well when instances are added or removed. Users behind a corporate NAT or shared proxy all share the same source IP, so they all land on the same instance, which defeats the load balancing for those users.
 
 ### AWS Application Load Balancer
 
-Enable stickiness on the target group so the ALB routes the same client to the same instance on every request.
+Enable stickiness on the target group so the ALB routes the same client to the same instance on every request:
 
 1. Open the EC2 console and go to **Target Groups**.
 2. Select your target group.
@@ -160,14 +177,14 @@ Enable stickiness on the target group so the ALB routes the same client to the s
 5. Set a stickiness duration appropriate for your use case (for example, 1 day).
 6. Save changes.
 
-The ALB will set an `AWSALB` cookie on the first response. Subsequent requests from the same browser carrying that cookie are routed to the same target.
+The ALB sets an `AWSALB` cookie on the first response. Subsequent requests from the same browser carrying that cookie are routed to the same target.
 
 !!! note
     ALB stickiness applies at the target group level. Both the initial page load request and the SSE stream connection need to reach the same instance for the dashboard to work correctly. Because browsers open the SSE connection from the same session, the stickiness cookie covers both.
 
 ### Traefik
 
-Define a service with sticky cookies and a router that directs dashboard traffic to it. The example below uses Traefik v2 dynamic configuration in YAML format.
+Define a service with sticky cookies and a router that directs dashboard traffic to it. The example below uses Traefik v2 dynamic configuration in YAML:
 
 ```yaml
 http:
@@ -193,7 +210,7 @@ http:
 
 The `httpOnly: true` flag prevents client-side JavaScript from reading the cookie.
 
-If you are using Docker labels instead of a file provider, the equivalent is:
+If you are using Docker labels instead of a file provider:
 
 ```yaml
 # docker-compose.yml (excerpt)
@@ -209,7 +226,13 @@ services:
 
 | Limitation | Notes |
 |---|---|
-| Live PENDING/RUNNING from other instances | Not visible. Each instance holds its own in-memory state. |
+| Live PENDING/RUNNING from other instances | Not visible. Each instance holds its own in-memory state only. |
 | SQLite across separate hosts | Not supported. Use Redis for multi-host deployments. |
 | Hard crash recovery | Tasks running at the time of a SIGKILL or OOM kill cannot be recovered. Only clean shutdowns write the pending store. |
-| Dashboard real-time cross-instance events | The dashboard polls the shared backend on a configurable interval (default 30s). It does not receive push notifications from other instances. |
+| Dashboard real-time cross-instance events | The dashboard polls the shared backend on a configurable interval (default 30 s). It does not receive push notifications from other instances. |
+
+## See also
+
+- [File Logging](file-logging.md)
+- [Setting Up TaskAdmin](task-admin.md)
+- [TaskManager reference](../api/task-manager.md)

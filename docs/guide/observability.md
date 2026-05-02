@@ -1,12 +1,19 @@
 # Observability
 
-fastapi-taskflow includes a pluggable observer system. Observers receive structured events for every `task_log()` call and every task lifecycle transition (RUNNING, SUCCESS, FAILED, INTERRUPTED). Multiple observers can run simultaneously with full error isolation: a failing observer never affects the task or other observers.
+This page explains the observer system: what it does, which built-in observers are available, how to combine them, and how to write your own.
 
-## Built-in observers
+## What the observer system does
 
-### FileLogger
+Every `task_log()` call and every task status transition (RUNNING, SUCCESS, FAILED, INTERRUPTED) emits a structured event. Observers receive those events and can forward them anywhere: a file, stdout, a logging service, a metrics backend.
 
-Writes log and lifecycle events to a rotating plain text file.
+Multiple observers run in parallel. If one raises an exception it is caught and silenced so the task and the remaining observers continue unaffected.
+
+!!! note
+    The dashboard already shows task output in real time. Observers are for cases where you need those events somewhere else too: a file for `tail -f`, stdout for a container log driver, or an in-memory buffer for test assertions.
+
+## FileLogger
+
+`FileLogger` writes events to a plain text file. It supports automatic rotation and external rotation via logrotate.
 
 ```python
 from fastapi_taskflow import FileLogger, TaskManager
@@ -17,33 +24,34 @@ task_manager = TaskManager(
 )
 ```
 
-Each log entry has the format:
+Each line written by a `task_log()` call looks like this:
 
 ```
 [abc12345] [send_email] 2026-01-01T12:00:00 Sending to user@example.com
 ```
 
-Lifecycle entries (when `log_lifecycle=True`):
+When `log_lifecycle=True`, status transitions get their own line:
 
 ```
 [abc12345] [send_email] 2026-01-01T12:00:00 -- RUNNING
+[abc12345] [send_email] 2026-01-01T12:00:00 Connecting to SMTP server
 [abc12345] [send_email] 2026-01-01T12:00:01 -- SUCCESS
 ```
 
-**FileLogger parameters:**
+**Parameters:**
 
 | Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
+|---|---|---|---|
 | `path` | `str` | required | File path to write to. Created if it does not exist. |
-| `max_bytes` | `int` | `10485760` | Maximum file size (10 MB) before rotating. Ignored in `watched` mode. |
+| `max_bytes` | `int` | `10485760` | File size limit (10 MB) before rotating. Ignored in `watched` mode. |
 | `backup_count` | `int` | `5` | Number of rotated backup files to keep. Ignored in `watched` mode. |
-| `mode` | `str` | `"rotate"` | `"rotate"` for automatic rotation; `"watched"` for external rotation via logrotate. |
-| `log_lifecycle` | `bool` | `False` | Also write lifecycle transitions. |
+| `mode` | `str` | `"rotate"` | `"rotate"` for automatic rotation, `"watched"` for external rotation via logrotate. |
+| `log_lifecycle` | `bool` | `False` | Write a line on each task status transition. |
 | `min_level` | `str` | `"info"` | Minimum log level to write. Entries below this level are silently dropped. |
 
-### StdoutLogger
+## StdoutLogger
 
-Prints log and lifecycle events to stdout. Useful in containers where stdout is captured by the logging agent (Fluentd, Logstash, CloudWatch Logs).
+`StdoutLogger` prints events to stdout. This is the right choice for containers where a log driver (Fluentd, Logstash, CloudWatch Logs) captures stdout automatically. There is no file to manage and no rotation to configure.
 
 ```python
 from fastapi_taskflow import StdoutLogger, TaskManager
@@ -53,22 +61,18 @@ task_manager = TaskManager(
 )
 ```
 
-Output format matches `FileLogger`:
+Output format is identical to `FileLogger`.
 
-```
-[abc12345] [send_email] 2026-01-01T12:00:00 Sending to user@example.com
-```
-
-**StdoutLogger parameters:**
+**Parameters:**
 
 | Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `log_lifecycle` | `bool` | `False` | Also print lifecycle transitions. |
+|---|---|---|---|
+| `log_lifecycle` | `bool` | `False` | Print a line on each task status transition. |
 | `min_level` | `str` | `"info"` | Minimum log level to print. |
 
-### InMemoryLogger
+## InMemoryLogger
 
-Captures events in memory. Designed for tests: assert exactly what log entries and lifecycle events were emitted.
+`InMemoryLogger` captures events in an in-memory list instead of writing anywhere. It is designed for tests where you want to assert exactly what was logged without touching the filesystem.
 
 ```python
 from fastapi_taskflow import InMemoryLogger, TaskManager
@@ -77,33 +81,39 @@ mem_logger = InMemoryLogger()
 task_manager = TaskManager(loggers=[mem_logger])
 ```
 
-Access captured events after the task runs:
+After the task runs, inspect the captured events:
 
 ```python
-# LogEvent and LifecycleEvent objects
-for event in mem_logger.log_events:
-    print(event.message, event.level, event.extra)
+def test_charge_payment_logs_amount():
+    mem_logger = InMemoryLogger()
+    task_manager = TaskManager(loggers=[mem_logger])
 
-for event in mem_logger.lifecycle_events:
-    print(event.func_name, event.status.value, event.duration)
+    # run the task synchronously in your test setup ...
 
-# Clear for the next test
-mem_logger.clear()
+    messages = [e.message for e in mem_logger.log_events]
+    assert any("amount=99.0" in m for m in messages)
+
+    statuses = [e.status.value for e in mem_logger.lifecycle_events]
+    assert statuses == ["running", "success"]
+
+    # clear between tests
+    mem_logger.clear()
 ```
 
-**InMemoryLogger parameters:**
+`log_events` is a list of `LogEvent` objects. `lifecycle_events` is a list of `LifecycleEvent` objects. The [Event reference](#event-reference) section below documents every field.
+
+**Parameters:**
 
 | Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `min_level` | `str` | `"debug"` | Minimum log level to capture. Default captures all levels. |
+|---|---|---|---|
+| `min_level` | `str` | `"debug"` | Minimum log level to capture. The default captures everything, including debug entries. |
 
-## Multiple observers
+## Running multiple observers
 
-Pass a list to `loggers=` to fan out to multiple observers simultaneously. All run independently: an error in one never affects the others.
+Pass a list to `loggers=` to send events to several observers at once:
 
-```python
-from fastapi_taskflow import TaskManager
-from fastapi_taskflow.loggers import FileLogger, StdoutLogger
+```python hl_lines="6 7"
+from fastapi_taskflow import FileLogger, StdoutLogger, TaskManager
 
 task_manager = TaskManager(
     snapshot_db="tasks.db",
@@ -114,46 +124,14 @@ task_manager = TaskManager(
 )
 ```
 
-## Tags
-
-Attach key/value labels to a task at enqueue time with `tags=`. Tags flow through to every `LogEvent` and `LifecycleEvent` emitted for that task, so downstream systems can filter logs by label without parsing message strings.
-
-```python
-from fastapi import Depends, FastAPI
-from fastapi_taskflow import TaskManager
-
-task_manager = TaskManager()
-app = FastAPI()
-
-@app.post("/invoice")
-def create_invoice(user_id: int, tasks=Depends(task_manager.get_tasks)):
-    task_id = tasks.add_task(
-        process_invoice,
-        user_id,
-        tags={"user_id": str(user_id), "source": "invoice_api"},
-    )
-    return {"task_id": task_id}
-```
-
-Tags are available inside the task via `get_task_context()`:
-
-```python
-from fastapi_taskflow import get_task_context
-
-@task_manager.task(retries=2)
-def process_invoice(user_id: int) -> None:
-    ctx = get_task_context()
-    source = ctx.tags.get("source", "unknown") if ctx else "unknown"
-    task_log("Processing invoice", user_id=user_id, source=source)
-```
+In this example every event goes to the file, but only warnings and above go to stdout. Each observer runs independently: a failure in one does not prevent the others from receiving the event.
 
 ## The log_file shorthand
 
-If you only need a single `FileLogger`, use the `log_file` shorthand on `TaskManager` instead of constructing `FileLogger` manually:
+If you only need a single `FileLogger`, you can use the `log_file` parameter on `TaskManager` directly instead of constructing a `FileLogger` by hand:
 
 ```python
 from fastapi_taskflow import TaskManager
-from fastapi_taskflow.loggers import FileLogger
 
 # shorthand
 task_manager = TaskManager(
@@ -164,8 +142,13 @@ task_manager = TaskManager(
     log_file_mode="rotate",
     log_lifecycle=True,
 )
+```
 
-# equivalent
+This is equivalent to:
+
+```python
+from fastapi_taskflow import FileLogger, TaskManager
+
 task_manager = TaskManager(
     snapshot_db="tasks.db",
     loggers=[
@@ -180,42 +163,54 @@ task_manager = TaskManager(
 )
 ```
 
-The shorthand is kept for backwards compatibility. Use `loggers=` directly when you need multiple observers or more control.
+!!! tip
+    The `log_file` shorthand exists for backwards compatibility and quick setups. When you need more than one observer, or you want to combine a `FileLogger` with a `StdoutLogger`, use `loggers=` directly.
 
 ## Custom observers
 
-Implement the `TaskObserver` ABC to send events anywhere:
+Implement `TaskObserver` to send events anywhere you like. You only need to override the methods you care about.
+
+There are two event-handling methods:
+
+- `on_log(event: LogEvent)` is called for every `task_log()` call.
+- `on_lifecycle(event: LifecycleEvent)` is called on each status transition.
+
+Both are `async` and optional. The base class provides no-op defaults.
 
 ```python
-from fastapi_taskflow import TaskObserver
+from fastapi_taskflow import TaskManager, TaskObserver
 from fastapi_taskflow.loggers.base import LifecycleEvent, LogEvent
 
 
-class MyObserver(TaskObserver):
+class SlackAlerter(TaskObserver):
     async def on_log(self, event: LogEvent) -> None:
-        # event.task_id, event.func_name, event.message,
-        # event.level, event.timestamp, event.attempt,
-        # event.tags, event.extra
-        await my_log_service.send(event.message, tags=event.tags)
+        # Available fields: task_id, func_name, message, level,
+        # timestamp, attempt, tags, extra
+        if event.level == "error":
+            await slack.post(f"[{event.func_name}] {event.message}")
 
     async def on_lifecycle(self, event: LifecycleEvent) -> None:
-        # event.status, event.duration, event.error, event.stacktrace
+        # Available fields: task_id, func_name, status, timestamp,
+        # attempt, retries_used, duration, error, stacktrace, tags
         if event.status.value == "failed":
-            await alert_service.notify(event.func_name, event.error)
+            await slack.post(
+                f"Task {event.func_name} failed after "
+                f"{event.retries_used} retries: {event.error}"
+            )
 
     async def startup(self) -> None:
-        await my_log_service.connect()
+        # Called when TaskAdmin mounts the app.
+        await slack.connect()
 
     async def close(self) -> None:
-        await my_log_service.disconnect()
+        # Called on shutdown.
+        await slack.disconnect()
 
 
-from fastapi_taskflow import TaskManager
-
-task_manager = TaskManager(loggers=[MyObserver()])
+task_manager = TaskManager(loggers=[SlackAlerter()])
 ```
 
-`startup()` is called when `TaskAdmin` mounts the app. `close()` is called on shutdown. Both default to no-ops in the base class.
+`startup()` and `close()` are optional lifecycle hooks. Override them when you need to open or close a connection on startup and shutdown.
 
 ## Event reference
 
@@ -224,28 +219,28 @@ task_manager = TaskManager(loggers=[MyObserver()])
 Emitted for every `task_log()` call.
 
 | Field | Type | Description |
-|-------|------|-------------|
+|---|---|---|
 | `task_id` | `str` | UUID of the task. |
 | `func_name` | `str` | Task function name. |
 | `message` | `str` | The log message. |
-| `level` | `str` | Log level string (`"debug"`, `"info"`, `"warning"`, `"error"`). |
+| `level` | `str` | Log level: `"debug"`, `"info"`, `"warning"`, or `"error"`. |
 | `timestamp` | `datetime` | UTC time the entry was created. |
 | `attempt` | `int` | Zero-based retry index. |
 | `tags` | `dict[str, str]` | Tags attached at enqueue time. |
-| `extra` | `dict` | Arbitrary extra fields from `task_log(**extra)`. |
+| `extra` | `dict` | Arbitrary keyword arguments passed to `task_log()`. |
 
 ### LifecycleEvent
 
 Emitted on each status transition.
 
 | Field | Type | Description |
-|-------|------|-------------|
+|---|---|---|
 | `task_id` | `str` | UUID of the task. |
 | `func_name` | `str` | Task function name. |
-| `status` | `TaskStatus` | New status (`RUNNING`, `SUCCESS`, `FAILED`, `INTERRUPTED`). |
+| `status` | `TaskStatus` | New status: `RUNNING`, `SUCCESS`, `FAILED`, or `INTERRUPTED`. |
 | `timestamp` | `datetime` | UTC time of the transition. |
 | `attempt` | `int` | Zero-based retry index. |
-| `retries_used` | `int` | Total retries consumed. |
+| `retries_used` | `int` | Total retries consumed so far. |
 | `duration` | `float \| None` | Seconds from start to end. Present on `SUCCESS` and `FAILED`. |
 | `error` | `str \| None` | Error message string. Present on `FAILED`. |
 | `stacktrace` | `str \| None` | Formatted traceback. Present on `FAILED`. |
@@ -255,4 +250,4 @@ Emitted on each status transition.
 
 - [Task Logging](logging.md)
 - [Task Context](task-context.md)
-- [File Logging](file-logging.md) - rotation options and multi-process deployment
+- [File Logging](file-logging.md)

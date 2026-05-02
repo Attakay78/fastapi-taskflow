@@ -166,6 +166,7 @@ class SnapshotScheduler:
             # Ensure the task record is in the store so the dashboard shows it.
             self._task_manager.store.restore(record)
 
+            executor_obj = self._task_manager._resolve_executor(func, config)
             asyncio.create_task(
                 execute_task(
                     func,
@@ -174,11 +175,11 @@ class SnapshotScheduler:
                     self._task_manager.store,
                     record.args,
                     record.kwargs,
+                    executor_obj=executor_obj,
                     backend=self._backend,
                     logger=self._task_manager.logger,
                     encryptor=self._task_manager.fernet,
-                    semaphore=self._task_manager._task_semaphore,
-                    sync_executor=self._task_manager._sync_executor,
+                    running_tasks=self._task_manager._running_tasks,
                 )
             )
             dispatched += 1
@@ -224,7 +225,14 @@ class SnapshotScheduler:
         """
         record = self._task_manager.store.get(task_id)
         if record is not None:
-            await self._backend.save([record])
+            try:
+                await self._backend.save([record])
+            except Exception:
+                logger.exception(
+                    "fastapi-taskflow: flush_one failed for task %s — "
+                    "record remains in memory and will be retried on the next periodic flush.",
+                    task_id,
+                )
 
     async def flush_pending(self) -> int:
         """
@@ -324,12 +332,23 @@ class SnapshotScheduler:
         """
         while True:
             await asyncio.sleep(self._interval)
-            await self.flush()
+            try:
+                await self.flush()
+            except Exception:
+                logger.exception(
+                    "fastapi-taskflow: periodic flush failed — will retry in %.0fs.",
+                    self._interval,
+                )
             if self._retention_days is not None:
                 self._retention_counter += 1
                 if self._retention_counter >= self._retention_every:
                     self._retention_counter = 0
-                    await self._prune_old_records()
+                    try:
+                        await self._prune_old_records()
+                    except Exception:
+                        logger.exception(
+                            "fastapi-taskflow: retention pruning failed — will retry next cycle."
+                        )
 
     async def _prune_old_records(self) -> None:
         """Delete terminal records older than *retention_days* from the store and backend.

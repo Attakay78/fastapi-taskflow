@@ -5,8 +5,8 @@ hide:
 ---
 
 <div class="hero">
-  <h1>Turn <span class="hero-accent">FastAPI BackgroundTasks</span> into a production-ready task system</h1>
-  <p class="sub">Retries, control, resiliency and visibility without workers or brokers.</p>
+  <h1>Retries, persistence, and visibility for <span class="hero-accent">FastAPI's BackgroundTasks</span></h1>
+  <p class="sub">Production-grade background tasks. No workers, no brokers, drop-in.</p>
   <div class="hero-actions">
     <a class="btn btn-primary" href="getting-started/installation/">Get Started</a>
     <a class="btn btn-secondary" href="getting-started/quickstart/">Quick Start</a>
@@ -18,30 +18,34 @@ hide:
 <div class="problem-section">
   <div class="problem-header">
     <p class="section-label">The problem</p>
-    <p class="section-title">BackgroundTasks is fine, until it isn't</p>
-    <p class="problem-desc">FastAPI's <a href="https://fastapi.tiangolo.com/tutorial/background-tasks/" target="_blank"><code>BackgroundTasks</code></a> is great for simple work. But in production you hit the same gaps fast, tasks fail silently, nothing is tracked, and restarts wipe all state.</p>
+    <p class="section-title">BackgroundTasks is fine, until production finds the gaps</p>
+    <p class="problem-desc">You shipped <code>background_tasks.add_task(send_email, address=email)</code> and it worked in dev. Then you deployed it, a task failed, and you had no idea. No retry happened. No log survived. The user never got their email. You found out three days later when they complained.</p>
   </div>
   <div class="compare-grid">
     <div class="compare-col before">
       <h4>Without fastapi-taskflow</h4>
       <ul>
-        <li>No retries on failure</li>
-        <li>No task IDs or status</li>
-        <li>No visibility into what ran</li>
-        <li>No history after restart</li>
-        <li>No metrics or duration</li>
-        <li>No logs or error traces</li>
+        <li>Tasks fail silently, no retry or backoff</li>
+        <li>Tasks compete with request handlers for the same event loop</li>
+        <li>Pending tasks lost on every restart</li>
+        <li>No task IDs, no status, no history</li>
+        <li>No priority, every task waits in the same queue</li>
+        <li>Retried requests run the task again with no deduplication</li>
+        <li>No dashboard, no logs, no stack traces on failure</li>
+        <li>No persistence, everything lives in memory</li>
       </ul>
     </div>
     <div class="compare-col">
       <h4>With fastapi-taskflow</h4>
       <ul>
-        <li>Automatic retries with backoff</li>
-        <li>UUID per task, full lifecycle</li>
-        <li>Live dashboard over SSE</li>
-        <li>SQLite or Redis persistence</li>
-        <li>Success rate and duration metrics</li>
-        <li>Per-task logs and full stack traces</li>
+        <li>Automatic retries with configurable delay and backoff</li>
+        <li>Concurrency caps keep tasks from starving request handlers</li>
+        <li>Pending tasks requeued automatically on the next startup</li>
+        <li>UUID per task, full lifecycle tracking and status history</li>
+        <li>Priority queues so urgent tasks never wait behind batch jobs</li>
+        <li>Idempotency keys prevent duplicate execution on retried requests</li>
+        <li>Live dashboard over SSE with per-task logs and stack traces</li>
+        <li>SQLite in dev, Redis, PostgreSQL, or MySQL in prod</li>
       </ul>
     </div>
   </div>
@@ -110,99 +114,87 @@ def signup(email: str, background_tasks: BackgroundTasks):
   </script>
 </div>
 
+<div class="who-section">
+  <p class="section-label">Fit</p>
+  <p class="section-title">Who this is for</p>
+  <div class="who-grid">
+    <div class="who-col">
+      <h4>Good fit</h4>
+      <ul>
+        <li>Teams already using FastAPI's native <code>BackgroundTasks</code></li>
+        <li>Apps that need retries, status tracking, and a dashboard without adding Celery</li>
+        <li>Services where background work runs inside the same process as the web server</li>
+        <li>Multi-instance deployments on SQLite (same host) or Redis, PostgreSQL, MySQL (any host)</li>
+        <li>Teams who want structured task logs, encryption, and observability hooks without new infrastructure</li>
+      </ul>
+    </div>
+    <div class="who-col">
+      <h4>Not a good fit</h4>
+      <ul>
+        <li>Tasks that must run on dedicated worker machines completely separate from the web server</li>
+        <li>Workflows that need message broker routing, fan-out, or cross-language workers</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
 <div class="section">
   <p class="section-label">Features</p>
-  <p class="section-title">Everything you need, nothing you don't</p>
-  <div class="feature-grid">
+  <p class="section-title">What you get</p>
+  <div class="feature-list">
 
-  <div class="feature-card">
-    <span class="icon">↩</span>
-    <h3>Automatic Retries</h3>
-    <p>Configure retries, delay, and exponential backoff per function using a single decorator.</p>
+  <div class="feature-item">
+    <p class="feature-item-label">Reliability</p>
+    <h3>Tasks that survive failures and restarts</h3>
+    <p>Automatic retries with configurable delay and exponential backoff. Unfinished tasks are saved on shutdown and re-dispatched on the next startup. Idempotency keys prevent duplicate execution across retried requests and webhooks.</p>
   </div>
 
-  <div class="feature-card">
-    <span class="icon">◎</span>
-    <h3>Task Lifecycle Tracking</h3>
-    <p>Every task gets a UUID and moves through PENDING, RUNNING, SUCCESS, and FAILED states.</p>
+  <div class="feature-item">
+    <p class="feature-item-label">Visibility</p>
+    <h3>See what happened without digging</h3>
+    <p>Live admin panel at <code>/tasks/dashboard</code>. Every task has a UUID, a status, per-task logs, and a full stack trace on failure. All in one place, nothing to configure.</p>
   </div>
 
-  <div class="feature-card">
-    <span class="icon">▦</span>
-    <h3>Live Dashboard</h3>
-    <p>A real-time admin panel at <code>/tasks/dashboard</code> with filtering, search, and task detail.</p>
+  <div class="feature-item">
+    <p class="feature-item-label">Observability</p>
+    <h3>Structured logs from inside your tasks</h3>
+    <p>Call <code>task_log(message, level=, **extra)</code> from anywhere in a running task. Extras flow to observers as structured fields. <code>FileLogger</code>, <code>StdoutLogger</code>, and <code>InMemoryLogger</code> included.</p>
   </div>
 
-  <div class="feature-card">
-    <span class="icon">⊞</span>
-    <h3>Pluggable Persistence</h3>
-    <p>SQLite out of the box. Redis available as an optional extra. Custom backends via a simple ABC.</p>
+  <div class="feature-item">
+    <p class="feature-item-label">Persistence</p>
+    <h3>SQLite in dev, PostgreSQL in prod</h3>
+    <p>SQLite works with zero setup. Swap to Redis, PostgreSQL, or MySQL with one line. All backends support task history, requeue, idempotency, and scheduled task locking.</p>
   </div>
 
-  <div class="feature-card">
-    <span class="icon">⟳</span>
-    <h3>Pending Requeue</h3>
-    <p>Tasks that did not finish before shutdown are saved and re-dispatched on next startup. Tasks interrupted mid-execution are marked INTERRUPTED or requeued based on a per-task flag.</p>
+  <div class="feature-item">
+    <p class="feature-item-label">Multi-instance</p>
+    <h3>Scale out without coordination overhead</h3>
+    <p>Requeue claiming is atomic, so only one instance picks up each pending task. Task history is shared across all nodes. Idempotency keys work cross-instance.</p>
   </div>
 
-  <div class="feature-card">
-    <span class="icon">⇌</span>
-    <h3>Zero-Migration Injection</h3>
-    <p>Keep your existing <code>background_tasks: BackgroundTasks</code> signatures. One line at startup is all it takes.</p>
+  <div class="feature-item">
+    <p class="feature-item-label">Control</p>
+    <h3>Run tasks exactly the way you need</h3>
+    <p>Priority queues, eager dispatch, async concurrency semaphore, dedicated sync thread pool, and a process executor for CPU-bound work. Set defaults on the decorator and override per call.</p>
   </div>
 
-  <div class="feature-card">
-    <span class="icon">≡</span>
-    <h3>Task Logging</h3>
-    <p>Call <code>task_log(message, level=, **extra)</code> inside any task. Structured extras flow to observers. Logs and stack traces appear in the dashboard detail panel.</p>
+  <div class="feature-item">
+    <p class="feature-item-label">Scheduling</p>
+    <h3>Interval and cron, distributed-safe</h3>
+    <p>Register periodic tasks with <code>every=</code> or a cron expression. A distributed lock ensures only one instance fires each entry per interval.</p>
   </div>
 
-  <div class="feature-card">
-    <span class="icon">◎</span>
-    <h3>Pluggable Observers</h3>
-    <p><code>FileLogger</code>, <code>StdoutLogger</code>, and <code>InMemoryLogger</code> out of the box. Implement <code>TaskObserver</code> to send events anywhere. Multiple observers run independently.</p>
+  <div class="feature-item">
+    <p class="feature-item-label">Security</p>
+    <h3>Sensitive args, never in plain text</h3>
+    <p>Fernet encryption for task args and kwargs at enqueue time. Never stored in the task store, the database, or any log file. One key, one config option.</p>
   </div>
 
-  <div class="feature-card">
-    <span class="icon">&#9783;</span>
-    <h3>File Logging</h3>
-    <p>Write task logs to a plain text file alongside the dashboard. Works with <code>tail -f</code>, <code>grep</code>, and any log shipper (Loki, Datadog, Fluentd, CloudWatch). Supports automatic rotation and external rotation via logrotate.</p>
-  </div>
-
-  <div class="feature-card">
-    <span class="icon">⊙</span>
-    <h3>Task Context</h3>
-    <p>Call <code>get_task_context()</code> from anywhere in the call stack to access the current task's ID, function name, retry attempt, and tags without threading state through parameters.</p>
-  </div>
-
-  <div class="feature-card">
-    <span class="icon">⬡</span>
-    <h3>Tags</h3>
-    <p>Attach key/value labels at enqueue time with <code>tags=</code>. Tags flow through to every log and lifecycle event, enabling label-based filtering in downstream log aggregators.</p>
-  </div>
-
-  <div class="feature-card">
-    <span class="icon">⊘</span>
-    <h3>Argument Encryption</h3>
-    <p>Set <code>encrypt_args_key</code> to encrypt task args and kwargs with Fernet at enqueue time. Sensitive data is never stored in plain text in the task store, database, or log files.</p>
-  </div>
-
-  <div class="feature-card">
-    <span class="icon">◈</span>
-    <h3>Idempotency Keys</h3>
-    <p>Pass an <code>idempotency_key</code> to <code>add_task()</code> to prevent the same logical operation from running twice, even across multiple instances.</p>
-  </div>
-
-  <div class="feature-card">
-    <span class="icon">⊕</span>
-    <h3>Multi-Instance Support</h3>
-    <p>Run multiple instances behind a load balancer with SQLite (same host) or Redis (any host). Requeue claiming is atomic. Task history is shared across all instances.</p>
-  </div>
-
-  <div class="feature-card">
-    <span class="icon">⏱</span>
-    <h3>Scheduled Tasks</h3>
-    <p>Register periodic tasks with <code>@task_manager.schedule(every=)</code> or a cron expression. Retries, logging, and the dashboard all work automatically. A distributed lock prevents double-firing in multi-instance deployments.</p>
+  <div class="feature-item">
+    <p class="feature-item-label">Adoption</p>
+    <h3>Keep your existing route signatures</h3>
+    <p>One line at startup hooks into FastAPI's injection. Your <code>background_tasks: BackgroundTasks</code> annotations stay exactly as they are. You get task IDs on every existing route with no other changes.</p>
   </div>
 
   </div>
@@ -212,8 +204,8 @@ def signup(email: str, background_tasks: BackgroundTasks):
   <p class="section-label">Positioning</p>
   <p class="section-title">Not a Celery replacement</p>
   <p>fastapi-taskflow does not compete with Celery, ARQ, Taskiq, or Dramatiq. Those tools are built for distributed workers, message brokers, and high-throughput task routing across separate machines.</p>
-  <p>This library is for teams using FastAPI's native <code>BackgroundTasks</code> who want retries, visibility, and resilience without adding worker infrastructure. It supports multi-instance deployments with a shared SQLite file (same host) or Redis (any host), including atomic requeue claiming, idempotency keys, and shared task history across instances.</p>
-  <p>If your tasks need to run on dedicated worker processes completely separate from your web application, use a proper task queue.</p>
+  <p>This library is for teams using FastAPI's native <code>BackgroundTasks</code> who want retries, visibility, and resilience without adding worker infrastructure. It supports multi-instance deployments with a shared SQLite file (same host) or Redis, PostgreSQL, MySQL (any host), including atomic requeue claiming, idempotency keys, and shared task history across instances.</p>
+  <p>CPU-bound tasks can run in a <code>ProcessPoolExecutor</code> via <code>executor='process'</code>, which bypasses the GIL and runs workers in separate OS processes. This covers most in-process CPU workloads. If your tasks need to run on separate machines entirely, use a proper task queue.</p>
   <p><a href="getting-started/installation/">Get started &rarr;</a></p>
 </div>
 

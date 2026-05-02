@@ -1,308 +1,237 @@
 # Dashboard
 
-fastapi-taskflow includes a live admin dashboard at `/tasks/dashboard` (or whatever path you configure on `TaskAdmin`).
+The dashboard is a live admin UI that gives you real-time visibility into every task your application runs, with controls to inspect, retry, cancel, and export them, all without writing any extra code.
 
-![Dashboard](../assets/images/dashboard.png)
+<a href="../../assets/images/dashboard.png" target="_blank" class="img-link">
+  <img src="../../assets/images/dashboard.png" alt="Dashboard" class="screenshot" />
+</a>
 
-## Mounting
+---
 
-The dashboard is included automatically when you use `TaskAdmin`:
+## Accessing the Dashboard
+
+The dashboard is mounted automatically when you use `TaskAdmin`:
 
 ```python
 TaskAdmin(app, task_manager)
 # Dashboard available at /tasks/dashboard
 ```
 
-Custom path:
+You can mount it at a custom path:
 
 ```python
 TaskAdmin(app, task_manager, path="/admin/tasks")
 # Dashboard available at /admin/tasks/dashboard
 ```
 
-## Features
-
-- Live task table updated over SSE with no polling and no page refresh
-- Metrics row: total, pending, running, success, failed, interrupted, cancelled, success rate, avg duration
-- Search bar filters the table by task ID or function name across all pages
-- Status filter and function filter dropdowns, including the cancelled status
-- Time-range filter with custom value and unit (minutes, hours, days)
-- Export CSV downloads the current filtered and sorted view as a `.csv` file
-- Clear history button deletes completed tasks older than a chosen window
-- Sortable columns with sort preference persisted across reloads
-- Pagination at 30 tasks per page
-- Task detail slide-in panel with tabs: Details, Logs, Error
-- Copy task ID to clipboard from any table row or the detail panel
-- Pause live updates, buffers incoming SSE events and shows a new-task count
-- Bulk retry: select multiple failed or interrupted tasks and retry them in one click
-- Cancel button on pending tasks in the detail panel
-- Dead Letters tab showing only failed tasks with bulk replay controls
-- Audit tab showing a log of retry and cancel actions, visible when auth is configured
-
-## Tabs
-
-### View
-
-The live task table. Shows all task runs with their status, duration, retries, and error summary. Clicking a row opens the detail panel.
-
-### Dead Letters
-
-Shows only tasks with status `failed`, sorted newest first. The tab badge shows the current failed count.
-
-**Time-window replay.** A toolbar above the table lets you pick a window (last 1 hour, 6 hours, 24 hours, 7 days, or all time) and click **Replay window**. A confirmation modal summarises what will run before anything is dispatched. Each matched task is re-enqueued with its original function, args, and kwargs. The result is reported as a toast.
-
-**Selective replay.** Each row has a checkbox. Checking one or more rows shows a bulk bar with a **Replay selected** button that re-enqueues only the checked tasks. The selection is cleared automatically after dispatch.
-
-Both replay actions are recorded in the audit log with action type `bulk_retry`.
-
-### Schedules
-
-Lists all functions registered with `@task_manager.schedule()`. Shows the trigger expression (interval in seconds or cron string), the next scheduled run time, and the status of the most recent run.
-
-### Tasks
-
-Lists all functions registered with `@task_manager.task()` or `@task_manager.schedule()`. Each card shows the function name and its configuration: retry count, retry delay, backoff multiplier, and flags for `persist` and `requeue_on_interrupt`.
-
-### Audit
-
-Shows a log of retry and cancel actions taken via the dashboard or API. Each entry records the timestamp, action type, affected task ID, and the username of whoever performed the action. Only visible when `auth` is configured on `TaskAdmin`.
-
-## Search and filters
-
-The search bar sits below the metrics row and spans the full width of the page. It filters the task table in real time as you type. The search matches against both the task ID and the function name. The search term is persisted across page reloads via `localStorage`.
-
-The status and function dropdowns narrow the table further. All active filters combine: a task must pass every active filter to appear in the table.
-
-## Exporting tasks
-
-The **Export CSV** button downloads the current filtered and sorted view as a `.csv` file. The export reflects whatever filters are active at the time you click. The file is named `tasks-YYYY-MM-DD.csv`.
-
-Columns: `ID`, `Function`, `Status`, `Duration (ms)`, `Retries`, `Created`, `Error`.
-
-## Task detail panel
-
-Clicking any row opens a slide-in detail panel. The panel shows:
-
-- Task ID with a copy-to-clipboard button
-- Function name and current status
-- Timestamps: created, started, ended
-- Duration and retries used
-- Task arguments (when `display_func_args=True`)
-- Function analytics: total runs, success/failed counts, success rate, avg/min/max/P95 duration for the same function across all recorded runs
-- Five most recent runs of the same function
-
-The panel also shows action buttons depending on the task's current status:
-
-| Status | Action shown |
-|--------|-------------|
-| `pending` | Cancel button. Sets status to `cancelled` immediately. |
-| `running` | Cancel button. Sends a cancellation signal to the asyncio task. A note explains that sync tasks cannot be interrupted mid-thread. |
-| `failed` or `interrupted` | Retry button. Creates a new task with the same function and arguments. |
-
-The **Logs** and **Error** tabs appear only when the task has data for them.
-
-## Cancelling tasks
-
-Both pending and running tasks show a **Cancel task** button in the detail panel. For running tasks a note explains the sync-task limitation.
-
-Via the API:
-
-```bash
-curl -X POST http://localhost:8000/tasks/{task_id}/cancel
-```
-
-Response:
-
-```json
-{"task_id": "...", "task": {...}}
-```
-
-For `pending` tasks the status is set to `cancelled` immediately. For `running` async tasks the asyncio task receives a cancellation signal and the status transitions to `cancelled` once the executor handles the interruption. Sync tasks (functions running in a thread pool) stop being awaited but the underlying thread runs to completion. The cancel action is recorded in the audit log.
-
-## Retrying tasks
-
-Failed and interrupted tasks show a **Retry this task** button in the detail panel. Clicking it creates a new task with a fresh task ID using the same function, args, and kwargs as the original. The original record stays in history unchanged.
-
-Interrupted tasks show a warning that the function may have already partially executed. Only retry if you know the function is safe to run again.
-
-Via the API:
-
-```bash
-curl -X POST http://localhost:8000/tasks/{task_id}/retry
-```
-
-Response:
-
-```json
-{"task_id": "new-uuid", "task": {...}}
-```
-
-The retry will fail with `409` if the function is no longer registered in the current process.
-
-### Bulk retry
-
-Retry a specific set of tasks by ID:
-
-```bash
-curl -X POST http://localhost:8000/tasks/bulk-retry \
-  -H "Content-Type: application/json" \
-  -d '{"task_ids": ["uuid-1", "uuid-2"]}'
-```
-
-Response:
-
-```json
-{
-  "dispatched": 2,
-  "skipped": 0,
-  "results": [
-    {"original_task_id": "uuid-1", "new_task_id": "new-uuid-1"},
-    {"original_task_id": "uuid-2", "new_task_id": "new-uuid-2"}
-  ]
-}
-```
-
-Tasks that are not found, not in a retryable status, or whose function is no longer registered are counted in `skipped` and do not produce an error.
-
-### Replay by time window
-
-Retry all failed tasks created within a time window:
-
-```bash
-# Last 6 hours
-curl -X POST "http://localhost:8000/tasks/retry-failed?since=6h"
-
-# Last 7 days, one function only
-curl -X POST "http://localhost:8000/tasks/retry-failed?since=7d&func_name=send_email"
-
-# All time
-curl -X POST "http://localhost:8000/tasks/retry-failed?since=all"
-```
-
-The `since` parameter accepts `<N>h` (hours), `<N>d` (days), or `all`. The optional `func_name` parameter limits replay to one function. The response has the same shape as `/bulk-retry`.
-
-Both bulk endpoints record a `bulk_retry` entry in the audit log.
-
-## Audit log
-
-Every retry and cancel action is recorded with the timestamp, actor username, and the affected task ID. The last 1000 entries are kept in memory.
-
-Via the API:
-
-```bash
-curl http://localhost:8000/tasks/audit
-```
-
-Response:
-
-```json
-[
-  {
-    "entry_id": "...",
-    "action": "cancel",
-    "task_id": "...",
-    "actor": "alice",
-    "timestamp": "2024-01-15T10:30:00Z",
-    "detail": {}
-  },
-  {
-    "entry_id": "...",
-    "action": "retry",
-    "task_id": "...",
-    "actor": "bob",
-    "timestamp": "2024-01-15T10:28:00Z",
-    "detail": {"new_task_id": "..."}
-  },
-  {
-    "entry_id": "...",
-    "action": "bulk_retry",
-    "task_id": "bulk",
-    "actor": "alice",
-    "timestamp": "2024-01-15T10:25:00Z",
-    "detail": {"since": "6h", "dispatched": 4, "skipped": 1}
-  }
-]
-```
-
-Action types: `retry`, `cancel`, `bulk_retry`. Bulk retry entries use `"task_id": "bulk"` and record the window or task IDs along with the dispatched and skipped counts in `detail`.
-
-When auth is not configured, `actor` is always `"anonymous"`. The Audit tab in the dashboard is only shown when `auth` is configured.
-
-## Automatic retention
-
-Old terminal records can be pruned automatically on a schedule:
-
-```python
-TaskManager(snapshot_db="tasks.db", retention_days=30)
-```
-
-Or via `TaskAdmin` to override the manager's setting at mount time:
-
-```python
-TaskAdmin(app, task_manager, retention_days=30)
-```
-
-Pruning runs approximately every 6 hours during the snapshot loop and removes records with status `success`, `failed`, or `cancelled` whose `end_time` is older than the configured number of days. Pending and running tasks are never deleted.
-
-The same action is available on demand via the API or the **Clear history** button in the dashboard.
-
-## Showing task arguments
-
-```python
-TaskAdmin(app, task_manager, display_func_args=True)
-```
-
-When enabled, task arguments are stored and shown in the detail panel. Disable if arguments may contain sensitive data.
-
-## Poll interval
-
-The SSE stream wakes up immediately on any local task mutation. It also wakes on a configurable interval to pick up completed tasks from other instances that have flushed to the shared backend.
-
-```python
-TaskAdmin(app, task_manager, poll_interval=10.0)  # default: 30.0 seconds
-```
-
-When no backend is configured, the interval is used only to send a keep-alive comment.
-
-## Multi-instance deployments
-
-When running multiple instances behind a load balancer, the dashboard shows the live tasks for whichever instance the SSE stream is connected to. Completed tasks from all instances are visible via the shared backend.
-
-For consistent live task visibility, route dashboard traffic to a single instance using sticky sessions. See the [multi-instance guide](multi-instance.md) for details.
-
-## Authentication
-
-The dashboard and all task API endpoints can be protected with login. See the [Authentication guide](authentication.md) for full details.
+If you have configured authentication, you will be prompted to log in before the dashboard loads:
 
 ```python
 TaskAdmin(app, task_manager, auth=("admin", "secret"))
 ```
 
-## Endpoints
+See the [Authentication guide](authentication.md) for full details on protecting the dashboard and API endpoints.
 
-All routes are relative to the `path` you configure (default `/tasks`).
+---
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/tasks` | JSON list of all tasks |
-| `GET` | `/tasks/metrics` | JSON aggregated statistics |
-| `GET` | `/tasks/audit` | JSON audit log |
-| `GET` | `/tasks/{task_id}` | JSON single task detail |
-| `POST` | `/tasks/{task_id}/retry` | Retry a failed or interrupted task |
-| `POST` | `/tasks/{task_id}/cancel` | Cancel a pending task |
-| `POST` | `/tasks/bulk-retry` | Retry a specific list of tasks by ID |
-| `POST` | `/tasks/retry-failed` | Retry all failed tasks within a time window |
-| `DELETE` | `/tasks/history` | Delete completed tasks older than a time window |
-| `GET` | `/tasks/dashboard` | HTML dashboard |
-| `GET` | `/tasks/dashboard/stream` | SSE event stream |
+## The View Tab
 
-## SSE event format
+The **View** tab is the main task table. It updates live over a Server-Sent Events stream, so you see new tasks and status changes the moment they happen, with no polling and no page refresh.
 
-The dashboard subscribes to `/tasks/dashboard/stream` which emits a single `state` event on each update:
+### Columns
 
+Each row in the table shows:
+
+| Column | What it shows |
+|---|---|
+| ID | The task UUID, with a copy-to-clipboard button |
+| Function | The registered function name |
+| Status | Current status badge |
+| Duration | Wall-clock time from start to end |
+| Retries | Number of retry attempts consumed |
+| Created | When the task was enqueued |
+| Error | A short summary of the exception, if any |
+
+Columns are sortable by clicking the column header. Your sort preference is saved in `localStorage` and restored on your next visit.
+
+### Filtering and Search
+
+Four controls sit above the table:
+
+- **Status dropdown** filters to a single status (pending, running, success, failed, interrupted, cancelled).
+- **Function dropdown** narrows the table to one registered function.
+- **Time-range picker** shows tasks created within a chosen window. You enter a number and pick a unit (minutes, hours, or days).
+- **Search bar** matches against both the task ID and the function name as you type. Your search term is persisted in `localStorage` across reloads.
+
+All active filters combine: a task must pass every one of them to appear in the table. The table paginates at 30 tasks per page.
+
+### Metrics Row
+
+Above the table, a row of stat cards summarises the current filtered view:
+
+| Stat | What it shows |
+|---|---|
+| Total | Count of all tasks matching the active filters |
+| Pending / Running / Success / Failed / Interrupted / Cancelled | Count per status |
+| Success rate | Percentage of terminal tasks that ended in `success` |
+| Avg duration | Mean wall-clock time across completed tasks |
+| Min / Max duration | Fastest and slowest recorded run |
+| P95 duration | The 95th-percentile duration, useful for spotting outliers |
+
+---
+
+## Task Detail Panel
+
+Click any row to open a slide-in detail panel for that task.
+
+<a href="../../assets/images/task_details.png" target="_blank" class="img-link">
+  <img src="../../assets/images/task_details.png" alt="Task detail panel" class="screenshot" />
+</a>
+
+### Details Tab
+
+The **Details** tab shows everything about the task:
+
+- Task ID with a copy button
+- Function name and current status
+- Timestamps: created, started, and ended
+- Duration and retry count
+- Task arguments (when `display_func_args=True` is set on `TaskAdmin`)
+- Per-function analytics: total runs, success and failure counts, success rate, avg/min/max/P95 duration across all recorded runs of the same function
+- The five most recent runs of the same function, as a quick history
+
+### Logs Tab
+
+The **Logs** tab appears when the task has captured log output. It shows the log lines emitted during that run.
+
+<a href="../../assets/images/logs.png" target="_blank" class="img-link">
+  <img src="../../assets/images/logs.png" alt="Task logs tab" class="screenshot" />
+</a>
+
+### Error Tab
+
+The **Error** tab appears when the task ended with an exception. It shows the full traceback so you can diagnose the failure without leaving the dashboard.
+
+<a href="../../assets/images/error.png" target="_blank" class="img-link">
+  <img src="../../assets/images/error.png" alt="Task error tab" class="screenshot" />
+</a>
+
+### Action Buttons
+
+The available buttons depend on the task's current status:
+
+| Status | Action |
+|---|---|
+| `pending` | **Cancel task** sets the status to `cancelled` immediately. |
+| `running` | **Cancel task** sends a cancellation signal to the asyncio task. A note in the panel explains that sync tasks (running in a thread pool) cannot be interrupted mid-thread. |
+| `failed` or `interrupted` | **Retry this task** creates a new task with the same function, args, and kwargs. The original record stays in history unchanged. |
+
+!!! warning
+    For interrupted tasks, the retry button shows a warning that the function may have already partially executed. Only retry if you know the function is safe to run again from the beginning.
+
+---
+
+## Dead Letters Tab
+
+The **Dead Letters** tab shows only tasks with status `failed`, sorted newest first. The tab badge shows the current failed count at a glance.
+
+<a href="../../assets/images/dead_letters.png" target="_blank" class="img-link">
+  <img src="../../assets/images/dead_letters.png" alt="Dead letters tab" class="screenshot" />
+</a>
+
+### Retrying Individual Tasks
+
+Each row in the Dead Letters table has a checkbox. Select one or more tasks, and a bulk action bar appears with a **Replay selected** button. Clicking it re-enqueues only the checked tasks with their original function, args, and kwargs. The selection clears automatically after dispatch.
+
+### Replaying by Time Window
+
+A toolbar above the table lets you pick a time window (last 1 hour, 6 hours, 24 hours, 7 days, or all time) and click **Replay window**. A confirmation modal summarises how many tasks will be re-enqueued before anything is dispatched.
+
+!!! note
+    Both replay actions are recorded in the audit log with action type `bulk_retry`.
+
+---
+
+## Schedules Tab
+
+The **Schedules** tab lists every function registered with `@task_manager.schedule()`. For each schedule you can see:
+
+<a href="../../assets/images/schedule_tab.png" target="_blank" class="img-link">
+  <img src="../../assets/images/schedule_tab.png" alt="Schedules tab" class="screenshot" />
+</a>
+
+- The function name
+- The trigger expression (an interval in seconds or a cron string)
+- The next scheduled run time
+- The status of the most recent run
+
+---
+
+## Tasks Tab
+
+The **Tasks** tab lists all functions registered with `@task_manager.task()` or `@task_manager.schedule()`. Each entry shows the function name along with its configuration: retry count, retry delay, backoff multiplier, and the boolean flags `persist` and `requeue_on_interrupt`.
+
+<a href="../../assets/images/tasks_tab.png" target="_blank" class="img-link">
+  <img src="../../assets/images/tasks_tab.png" alt="Tasks tab" class="screenshot" />
+</a>
+
+This is a convenient reference when you want to confirm what configuration is active for a given function.
+
+---
+
+## Audit Tab
+
+The **Audit** tab records every retry and cancel action taken via the dashboard or API. Each entry shows:
+
+- Timestamp
+- Action type (`retry`, `cancel`, or `bulk_retry`)
+- The affected task ID
+- The username of whoever performed the action
+
+!!! info
+    The Audit tab is only shown when `auth` is configured on `TaskAdmin`. When auth is not configured, all actions are attributed to `"anonymous"` and the tab is hidden. The log keeps the last 1000 entries in memory.
+
+---
+
+## Pausing Live Updates
+
+The **Pause** button stops the dashboard from re-rendering as new SSE events arrive. Incoming events are buffered, and a counter shows how many new tasks have come in while updates are paused.
+
+This is useful when you are inspecting a specific row or reading through task details and do not want the table to shift around underneath you. Click **Resume** to flush the buffer and catch up.
+
+---
+
+## Exporting Tasks
+
+The **Export CSV** button downloads the current filtered and sorted view as a `.csv` file named `tasks-YYYY-MM-DD.csv`. The export reflects whatever filters are active at the time you click.
+
+Exported columns: `ID`, `Function`, `Status`, `Duration (ms)`, `Retries`, `Created`, `Error`.
+
+---
+
+## Clearing History
+
+The **Clear history** button deletes completed tasks that are older than a window you choose. Only tasks with a terminal status (`success`, `failed`, or `cancelled`) are removed. Pending and running tasks are never deleted.
+
+You can also configure automatic retention so old records are pruned on a schedule:
+
+```python
+TaskManager(snapshot_db="tasks.db", retention_days=30)
 ```
-event: state
-data: {"tasks": [...], "metrics": {...}}
+
+Or override the setting at mount time via `TaskAdmin`:
+
+```python
+TaskAdmin(app, task_manager, retention_days=30)
 ```
 
-The client re-renders the full table on each event. There is no partial update.
+Pruning runs approximately every 6 hours during the snapshot loop.
+
+---
+
+## Multi-Instance Note
+
+When you run multiple instances behind a load balancer, the **live task table shows only the tasks running on the instance your browser's SSE connection is attached to**. Completed tasks from all instances are visible through the shared backend.
+
+!!! tip
+    For consistent live visibility, route dashboard traffic to a single instance using sticky sessions. See the [multi-instance guide](multi-instance.md) for details.

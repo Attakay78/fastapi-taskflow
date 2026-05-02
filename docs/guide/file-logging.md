@@ -1,37 +1,42 @@
 # File Logging
 
-Log entries can be written to a plain text file in addition to the dashboard. This makes it easy to use standard tools like `tail -f`, `grep`, and log shippers (Loki, Datadog, Fluentd, CloudWatch) alongside the dashboard.
+This page shows you how to write task logs to a plain text file, filter by severity, and handle log rotation safely when multiple processes share the same host.
 
-## Setup with FileLogger
+## Why write to a file
 
-Pass a `FileLogger` instance to `loggers=` on `TaskManager`:
+The dashboard is great for watching tasks in real time, but a plain text log file gives you tools the dashboard does not.
+
+You can run `tail -f tasks.log` to follow output in a terminal, use `grep` to search history, and feed the file to any standard log shipper (Loki, Datadog, Fluentd, CloudWatch) that reads files directly. These workflows are especially useful in production where you want a durable, queryable record of what every task did.
+
+## Basic setup
+
+The quickest way to enable file logging is the `log_file` shorthand on `TaskManager`:
+
+```python
+from fastapi_taskflow import TaskManager
+
+task_manager = TaskManager(
+    snapshot_db="tasks.db",
+    log_file="tasks.log",
+)
+```
+
+Alternatively, pass a `FileLogger` instance directly to `loggers=`. This gives you access to all options in one place:
 
 ```python
 from fastapi_taskflow import FileLogger, TaskManager
 
 task_manager = TaskManager(
     snapshot_db="tasks.db",
-    loggers=[FileLogger("tasks.log", log_lifecycle=True)],
+    loggers=[FileLogger("tasks.log")],
 )
 ```
 
-## Setup with the log_file shorthand
-
-For a single file logger, use the `log_file` parameter directly on `TaskManager`:
-
-```python
-task_manager = TaskManager(
-    snapshot_db="tasks.db",
-    log_file="tasks.log",
-    log_lifecycle=True,
-)
-```
-
-Both approaches produce the same output. Use `loggers=` directly when you need multiple observers or want to combine `FileLogger` with `StdoutLogger`. See [Observability](observability.md) for the full observer system.
+Both approaches produce identical output. Use `loggers=` when you need more than one observer, for example combining a `FileLogger` with a `StdoutLogger`. See [Observability](observability.md) for the full observer system.
 
 ## Log format
 
-Every `task_log()` call and retry separator is written to the file. Each line has the format:
+Every `task_log()` call produces one line:
 
 ```
 [task_id] [func_name] 2026-01-01T12:00:00 message text
@@ -48,7 +53,7 @@ For example:
 
 ## Lifecycle events
 
-Set `log_lifecycle=True` to also write a line for each task status transition (`RUNNING`, `SUCCESS`, `FAILED`, `INTERRUPTED`):
+By default only `task_log()` messages are written. Set `log_lifecycle=True` to also write a line for each status transition (RUNNING, SUCCESS, FAILED, INTERRUPTED). This makes it easy to calculate task duration or count failures with `grep`.
 
 ```python
 FileLogger("tasks.log", log_lifecycle=True)
@@ -62,65 +67,79 @@ Output:
 [abc12345] [send_email] 2026-01-01T12:00:01 -- SUCCESS
 ```
 
-## Log level filtering
+## Filtering by log level
 
-Set `min_level=` to suppress entries below a certain severity:
+Set `min_level=` to drop entries below a certain severity. Entries below the threshold are silently ignored and never written to the file.
 
 ```python
 FileLogger("tasks.log", min_level="warning")
 ```
 
-Valid levels from lowest to highest: `"debug"`, `"info"`, `"warning"`, `"error"`.
+Valid levels from lowest to highest: `"debug"`, `"info"`, `"warning"`, `"error"`. The default is `"info"`.
 
 ## FileLogger parameters
 
 | Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
+|---|---|---|---|
 | `path` | `str` | required | File path to write to. Created if it does not exist. |
-| `max_bytes` | `int` | `10485760` | Maximum file size (10 MB) before rotating. Ignored in `watched` mode. |
+| `max_bytes` | `int` | `10485760` | File size limit (10 MB) before rotating. Ignored in `watched` mode. |
 | `backup_count` | `int` | `5` | Number of rotated backup files to keep. Ignored in `watched` mode. |
-| `mode` | `str` | `"rotate"` | `"rotate"` for automatic rotation; `"watched"` for external rotation. |
+| `mode` | `str` | `"rotate"` | `"rotate"` for automatic rotation, `"watched"` for external rotation. |
 | `log_lifecycle` | `bool` | `False` | Write a line on each task status transition. |
 | `min_level` | `str` | `"info"` | Minimum log level to write. |
 
-## Multi-instance deployments
+## The multi-process rotation problem
 
-### Why `"rotate"` mode is not safe with multiple processes
+When you run several workers on the same host (for example, Gunicorn with multiple Uvicorn workers), all processes write to the same file. Normal writes are fine, but automatic rotation introduces a race condition.
 
-`"rotate"` mode uses Python's `RotatingFileHandler`. When the file reaches `max_bytes`, the handler does this sequence:
+`"rotate"` mode uses Python's `RotatingFileHandler`. When the file hits `max_bytes`, the handler does this:
 
 1. Close `tasks.log`
 2. Rename `tasks.log` to `tasks.log.1`
 3. Open a new `tasks.log`
 4. Write the line
 
-These are three separate OS calls with no lock across processes. If two processes hit the size limit at the same time, they both try to rename `tasks.log` to `tasks.log.1`. One rename wins silently and the other process's backup is overwritten.
+These are three separate OS calls with no cross-process lock. If two workers hit the size limit at the same moment, both try to rename `tasks.log` to `tasks.log.1`. One rename wins and the other silently overwrites it, dropping the previous backup.
 
-### Safe strategies
+!!! warning
+    Do not use `mode="rotate"` when multiple processes on the same host write to the same file path.
 
-**Separate file per instance (recommended)**
+## Safe strategies for multiple processes
 
-Give each instance its own path. Each file rotates independently with no coordination needed:
+### Separate file per instance (recommended)
+
+Give each worker its own path. Each file rotates independently with no coordination needed:
 
 ```python
-# Instance 1
+# Worker 1
 task_manager = TaskManager(
     snapshot_db="tasks.db",
     loggers=[FileLogger("tasks-1.log", log_lifecycle=True)],
 )
 
-# Instance 2
+# Worker 2
 task_manager = TaskManager(
     snapshot_db="tasks.db",
     loggers=[FileLogger("tasks-2.log", log_lifecycle=True)],
 )
 ```
 
-**External rotation with `"watched"` mode**
-
-Set `mode="watched"` and let an external tool such as `logrotate` manage rotation. `WatchedFileHandler` does not rotate at all. On every write it checks whether the file it has open still matches the inode and device of the path on disk. If `logrotate` has replaced the file, the handler detects the mismatch and reopens the path before writing.
+In Docker or Kubernetes, drive the path from an environment variable so each container gets a unique file automatically:
 
 ```python
+import os
+
+worker_id = os.getenv("WORKER_ID", "0")
+task_manager = TaskManager(
+    loggers=[FileLogger(f"tasks-{worker_id}.log")],
+)
+```
+
+### External rotation with watched mode
+
+Set `mode="watched"` and let logrotate manage rotation instead. `WatchedFileHandler` does not rotate on its own. On every write it checks whether the file it has open still matches the inode on disk. If logrotate has replaced the file, the handler detects the mismatch and reopens the new file before writing.
+
+```python hl_lines="6"
 task_manager = TaskManager(
     snapshot_db="tasks.db",
     loggers=[
@@ -133,7 +152,9 @@ task_manager = TaskManager(
 )
 ```
 
-### Setting up logrotate
+All workers write to the same path. Rotation is handled entirely by logrotate, so there is no race condition between Python processes.
+
+## Setting up logrotate
 
 Create `/etc/logrotate.d/myapp`:
 
@@ -146,7 +167,7 @@ Create `/etc/logrotate.d/myapp`:
     notifempty
     create 0644 www-data www-data
     postrotate
-        kill -HUP $(cat /var/run/myapp.pid)
+        pkill -HUP -f "uvicorn myapp"
     endscript
 }
 ```
@@ -155,52 +176,48 @@ Key directives:
 
 | Directive | What it does |
 |---|---|
-| `daily` | Rotate once a day (also: `weekly`, `monthly`, `size 100M`) |
-| `rotate 7` | Keep 7 backup files |
-| `compress` | Gzip old files |
-| `create 0644 www-data www-data` | Create a new empty file after rotation with the right owner |
-| `postrotate` | Signal your app after rotation (optional with `WatchedFileHandler`) |
+| `daily` | Rotate once a day. Also accepts `weekly`, `monthly`, or `size 100M`. |
+| `rotate 7` | Keep 7 backup files before deleting the oldest. |
+| `compress` | Gzip rotated files to save disk space. |
+| `create 0644 www-data www-data` | Create a fresh empty file after rotation with the correct owner. |
+| `postrotate` | Signal the app after rotation. Optional with `WatchedFileHandler`. |
 
-The `postrotate` block is optional. `WatchedFileHandler` detects the replaced file on the next write regardless.
+!!! tip
+    The `postrotate` block is optional when using `mode="watched"`. `WatchedFileHandler` detects the replaced file on the next write regardless of whether the process received a signal.
 
-If you do not have a PID file, use `pkill`:
+If your app writes a PID file, you can use `kill -HUP` with it instead of `pkill`:
 
 ```
 postrotate
-    pkill -HUP -f "uvicorn myapp"
+    kill -HUP $(cat /var/run/myapp.pid)
 endscript
 ```
 
-**Testing the config:**
+To test your config before applying it:
 
 ```bash
-# Dry run
+# Dry run: shows what would happen without touching any files
 logrotate --debug /etc/logrotate.d/myapp
 
-# Force a rotation now
+# Force a rotation right now
 sudo logrotate --force /etc/logrotate.d/myapp
 ```
 
-### Multiple hosts (Redis)
+## Multiple hosts (Redis backend)
 
-Each host writes its own file. `"rotate"` mode is safe here because no two processes share a file path. Use a log shipper to aggregate them:
+When workers run on separate machines, each host writes its own file. `"rotate"` mode is safe here because no two processes share a file path. Use a log shipper to aggregate files from all hosts:
 
 ```python
+from fastapi_taskflow import FileLogger, TaskManager
+from fastapi_taskflow.backends import RedisBackend
+
 task_manager = TaskManager(
-    snapshot_backend=RedisBackend("redis://localhost:6379/0"),
+    snapshot_backend=RedisBackend("redis://your-redis-host:6379/0"),
     loggers=[FileLogger("tasks.log", log_lifecycle=True)],
 )
 ```
 
-### Docker / no logrotate
+## See also
 
-Use separate files per instance and let your log driver handle rotation. Set a unique path per worker using an environment variable:
-
-```python
-import os
-
-worker_id = os.getenv("WORKER_ID", "0")
-task_manager = TaskManager(
-    loggers=[FileLogger(f"tasks-{worker_id}.log")],
-)
-```
+- [Observability](observability.md)
+- [Multi-Instance Deployments](multi-instance.md)

@@ -26,6 +26,8 @@ Quick start::
 from .admin import TaskAdmin
 from .auth import TaskAuthBackend
 from .backends import RedisBackend, SnapshotBackend, SqliteBackend
+from .executors import TaskExecutionContext
+from .executors.process_executor import TaskArgumentError
 from .loggers import (
     FileLogger,
     InMemoryLogger,
@@ -53,6 +55,9 @@ __all__ = [
     "SnapshotBackend",
     "SqliteBackend",
     "RedisBackend",
+    # Executor abstraction
+    "TaskExecutionContext",
+    "TaskArgumentError",
     # Logging
     "TaskObserver",
     "LogEvent",

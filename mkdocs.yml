@@ -1,5 +1,5 @@
 site_name: FastAPI-TaskFlow
-site_description: Retries, control, resiliency and visibility without workers or brokers
+site_description: Retries, persistence, and visibility for FastAPI's BackgroundTasks. Production-grade background tasks. No workers, no brokers, drop-in.
 site_url: https://attakay78.github.io/fastapi-taskflow/
 repo_url: https://github.com/Attakay78/fastapi-taskflow
 repo_name: fastapi-taskflow
@@ -7,6 +7,7 @@ edit_uri: ""
 
 theme:
   name: material
+  custom_dir: docs/overrides
   logo: logo.svg
   favicon: favicon.svg
   font:
@@ -76,6 +77,7 @@ nav:
     - File Logging: guide/file-logging.md
     - Argument Encryption: guide/encryption.md
     - Concurrency Controls: guide/concurrency.md
+    - Process Executor: guide/process-tasks.md
     - Priority Queues: guide/priority-queues.md
     - Eager Dispatch: guide/eager-dispatch.md
     - Scheduled Tasks: guide/scheduled-tasks.md

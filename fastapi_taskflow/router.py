@@ -175,9 +175,15 @@ def create_router(
 
             func, config = result
             new_task_id = str(uuid.uuid4())
+            executor_obj = task_manager._resolve_executor(func, config)
 
             task_manager.store.create(
-                new_task_id, func.__name__, record.args, record.kwargs, tags=record.tags
+                new_task_id,
+                func.__name__,
+                record.args,
+                record.kwargs,
+                tags=record.tags,
+                executor=executor_obj.name,
             )
 
             wrapped = make_background_func(
@@ -191,8 +197,7 @@ def create_router(
                 on_success=on_success,
                 logger=task_manager.logger,
                 encryptor=task_manager.fernet,
-                semaphore=task_manager._task_semaphore,
-                sync_executor=task_manager._sync_executor,
+                executor_obj=executor_obj,
                 running_tasks=task_manager._running_tasks,
             )
 
@@ -275,9 +280,15 @@ def create_router(
 
             func, config = result
             new_task_id = str(uuid.uuid4())
+            executor_obj = task_manager._resolve_executor(func, config)
 
             task_manager.store.create(
-                new_task_id, func.__name__, record.args, record.kwargs, tags=record.tags
+                new_task_id,
+                func.__name__,
+                record.args,
+                record.kwargs,
+                tags=record.tags,
+                executor=executor_obj.name,
             )
 
             wrapped = make_background_func(
@@ -291,8 +302,7 @@ def create_router(
                 on_success=on_success,
                 logger=task_manager.logger,
                 encryptor=task_manager.fernet,
-                semaphore=task_manager._task_semaphore,
-                sync_executor=task_manager._sync_executor,
+                executor_obj=executor_obj,
                 running_tasks=task_manager._running_tasks,
             )
 
@@ -434,13 +444,19 @@ def create_router(
 
         func, config = result
         new_task_id = str(uuid.uuid4())
+        executor_obj = task_manager._resolve_executor(func, config)
 
         scheduler = task_manager._scheduler
         backend = scheduler._backend if scheduler is not None else None
         on_success = scheduler.flush_one if scheduler is not None else None
 
         task_manager.store.create(
-            new_task_id, func.__name__, record.args, record.kwargs, tags=record.tags
+            new_task_id,
+            func.__name__,
+            record.args,
+            record.kwargs,
+            tags=record.tags,
+            executor=executor_obj.name,
         )
 
         wrapped = make_background_func(
@@ -454,8 +470,7 @@ def create_router(
             on_success=on_success,
             logger=task_manager.logger,
             encryptor=task_manager.fernet,
-            semaphore=task_manager._task_semaphore,
-            sync_executor=task_manager._sync_executor,
+            executor_obj=executor_obj,
             running_tasks=task_manager._running_tasks,
         )
 
@@ -517,8 +532,14 @@ def create_router(
             )
             task_manager._invalidate_backend_cache()
 
+        # Tasks snapshotted to the backend are also present in the in-memory
+        # store until evicted, so adding both counts double-counts them.
+        # The backend is the superset of persisted records; any store tasks
+        # not yet synced to the backend are the positive difference.
+        total = backend_deleted + max(0, store_deleted - backend_deleted)
+
         return {
-            "deleted": store_deleted + backend_deleted,
+            "deleted": total,
             "store": store_deleted,
             "backend": backend_deleted,
         }

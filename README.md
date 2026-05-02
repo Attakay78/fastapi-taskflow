@@ -2,15 +2,25 @@
   <img src="https://raw.githubusercontent.com/Attakay78/fastapi-taskflow/main/docs/banner.svg" alt="fastapi-taskflow" width="380" />
 </p>
 <p align="center">
-  <strong>Turn FastAPI BackgroundTasks into a production-ready task system.</strong><br/>
-  Retries, control, resiliency and visibility without workers or brokers.
+  <strong>Retries, persistence, and visibility for FastAPI's BackgroundTasks.</strong><br/>
+  Production-grade background tasks. No workers, no brokers, drop-in.
 </p>
 
 ---
 
-FastAPI's `BackgroundTasks` handles simple fire-and-forget work well. But in real applications you quickly hit the same gaps: tasks fail silently, you have no visibility into what ran, and nothing survives a restart.
+You shipped `background_tasks.add_task(send_email, address=email)` and it worked in dev. Then you deployed it and a task failed. You had no idea. No retry happened. No log survived. The user never got their email. You found out three days later when they complained.
 
-fastapi-taskflow is a thin layer on top of what you already have. It does not compete with Celery, ARQ, Taskiq, or Dramatiq. It is built for teams who are already using FastAPI's native background tasks and want retries, resilience, status tracking, and a live dashboard without adding infrastructure.
+FastAPI's `BackgroundTasks` is fine for simple fire-and-forget work. But production has a way of finding the gaps.
+
+**Does this sound familiar?**
+
+- A task failed and you only found out when a user complained
+- You restarted the server and lost every pending task in memory
+- You have no idea how many tasks ran, which ones failed, or how long they took
+- You added `try/except` and a print statement because there is no other option
+- You considered adding Celery just to get retries and visibility, then saw the ops cost
+
+fastapi-taskflow is a thin layer on top of `BackgroundTasks`. You keep your existing code. You get retries, persistence, a live dashboard, structured logging, and task history. No brokers, no workers, no new infrastructure.
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/Attakay78/fastapi-taskflow/main/docs/assets/images/dashboard.png" target="_blank">
@@ -26,56 +36,11 @@ fastapi-taskflow is a thin layer on top of what you already have. It does not co
   </a>
 </p>
 
-## Features
-
-- Automatic retries with configurable delay and exponential backoff
-- Task IDs and full lifecycle tracking: `PENDING`, `RUNNING`, `SUCCESS`, `FAILED`, `INTERRUPTED`
-- Live admin dashboard over SSE at `/tasks/dashboard`
-- SQLite persistence out of the box, Redis as an optional extra
-- Pending task requeue: unfinished tasks at shutdown are re-dispatched on startup
-- `requeue_on_interrupt`: opt-in requeue for idempotent tasks interrupted mid-execution
-- Idempotency keys: prevent duplicate execution of the same logical operation
-- Multi-instance support: atomic requeue claiming, shared task history across instances
-- `task_log(message, level=, **extra)`: structured log entries with level filtering and arbitrary extra fields
-- `get_task_context()`: access task metadata (task_id, attempt, tags) from any code path inside a running task
-- Tags: attach key/value labels at enqueue time, forwarded to every log and lifecycle event
-- Pluggable observers: `FileLogger`, `StdoutLogger`, `InMemoryLogger`, and custom `TaskObserver` implementations
-- Argument encryption: Fernet-based at-rest encryption for task args and kwargs
-- Trace context propagation: OpenTelemetry spans flow from the request into background execution (Python 3.11+)
-- Concurrency controls: opt-in semaphore for async tasks and dedicated thread pool for sync tasks
-- Priority queues: `priority=` on `@task_manager.task()` or `add_task()` — higher-priority tasks run first, equal-priority tasks are FIFO
-- Eager dispatch: `eager=True` starts a task immediately via `asyncio.create_task` before the HTTP response is sent
-- Scheduled tasks: `@task_manager.schedule(every=)` and `cron=` with distributed lock for multi-instance
-- Zero-migration injection: keep your existing `BackgroundTasks` annotations
-- Both sync and async task functions supported
-
-## Installation
+## Quick start
 
 ```bash
 pip install fastapi-taskflow
 ```
-
-With all optional dependencies:
-
-```bash
-pip install "fastapi-taskflow[all]"
-```
-
-Or install only what you need:
-
-| Extra | Installs | Required for |
-|-------|----------|--------------|
-| `redis` | `redis[asyncio]` | Redis persistence backend |
-| `scheduler` | `croniter` | Cron-based scheduled tasks |
-| `encryption` | `cryptography` | Argument encryption at rest |
-
-```bash
-pip install "fastapi-taskflow[redis]"
-pip install "fastapi-taskflow[scheduler]"
-pip install "fastapi-taskflow[encryption]"
-```
-
-## Quick start
 
 ```python
 from fastapi import BackgroundTasks, FastAPI
@@ -84,7 +49,7 @@ from fastapi_taskflow import TaskAdmin, TaskManager
 task_manager = TaskManager(snapshot_db="tasks.db", snapshot_interval=30.0)
 app = FastAPI()
 
-# auto_install=True patches FastAPI's BackgroundTasks injection so existing
+# auto_install=True wires FastAPI's BackgroundTasks injection so existing
 # route signatures work without any changes.
 TaskAdmin(app, task_manager, auto_install=True)
 
@@ -109,6 +74,64 @@ curl "http://localhost:8000/tasks/metrics"
 open "http://localhost:8000/tasks/dashboard"
 ```
 
+The route signature does not change. Tasks that fail are retried. If the server restarts before a task finishes, it is re-dispatched on startup. Every task has a UUID, a status, and a history entry you can query.
+
+## Features
+
+- Automatic retries with configurable delay and exponential backoff
+- Task IDs and full lifecycle tracking: `PENDING`, `RUNNING`, `SUCCESS`, `FAILED`, `INTERRUPTED`
+- Live admin dashboard over SSE at `/tasks/dashboard`
+- SQLite persistence out of the box; Redis, PostgreSQL, and MySQL as optional extras
+- Pending task requeue: unfinished tasks at shutdown are re-dispatched on startup
+- `requeue_on_interrupt`: opt-in requeue for idempotent tasks interrupted mid-execution
+- Idempotency keys: prevent duplicate execution of the same logical operation
+- Multi-instance support: atomic requeue claiming, shared task history across instances
+- `task_log(message, level=, **extra)`: structured log entries with level filtering and arbitrary extra fields
+- `get_task_context()`: access task metadata (task_id, attempt, tags) from any code path inside a running task
+- Tags: attach key/value labels at enqueue time, forwarded to every log and lifecycle event
+- Pluggable observers: `FileLogger`, `StdoutLogger`, `InMemoryLogger`, and custom `TaskObserver` implementations
+- Argument encryption: Fernet-based at-rest encryption for task args and kwargs
+- Trace context propagation: OpenTelemetry spans flow from the request into background execution (Python 3.11+)
+- Process executor: `executor='process'` routes CPU-bound tasks through a `ProcessPoolExecutor`, bypassing the GIL with true parallel workers
+- Concurrency controls: opt-in semaphore for async tasks, dedicated thread pool for sync tasks, and configurable process worker count
+- Priority queues: `priority=` on `@task_manager.task()` or `add_task()`, higher-priority tasks run first, equal-priority tasks are FIFO
+- Eager dispatch: `eager=True` starts a task immediately via `asyncio.create_task` before the HTTP response is sent
+- Scheduled tasks: `@task_manager.schedule(every=)` and `cron=` with distributed lock for multi-instance
+- Zero-migration injection: keep your existing `BackgroundTasks` annotations
+- Both sync and async task functions supported
+
+## Installation
+
+```bash
+pip install fastapi-taskflow
+```
+
+With all optional dependencies:
+
+```bash
+pip install "fastapi-taskflow[all]"
+```
+
+Or install only what you need:
+
+| Extra | Installs | Required for |
+|-------|----------|--------------|
+| `redis` | `redis[asyncio]` | Redis persistence backend |
+| `postgres` | `psycopg2-binary` | PostgreSQL persistence backend |
+| `mysql` | `PyMySQL` | MySQL / MariaDB persistence backend |
+| `scheduler` | `croniter` | Cron-based scheduled tasks |
+| `encryption` | `cryptography` | Argument encryption at rest |
+| `process` | `cloudpickle` | Extended serialization for `executor='process'` tasks |
+
+```bash
+pip install "fastapi-taskflow[redis]"
+pip install "fastapi-taskflow[postgres]"
+pip install "fastapi-taskflow[mysql]"
+pip install "fastapi-taskflow[scheduler]"
+pip install "fastapi-taskflow[encryption]"
+pip install "fastapi-taskflow[process]"
+```
+
 ## Injection patterns
 
 Three ways to get a `ManagedBackgroundTasks` instance into your routes:
@@ -124,7 +147,7 @@ from fastapi_taskflow import ManagedBackgroundTasks
 def route(background_tasks: ManagedBackgroundTasks):
     task_id = background_tasks.add_task(my_func, arg)
 
-# Pattern 3: explicit Depends — no install() required
+# Pattern 3: explicit Depends (no install() required)
 from fastapi import Depends
 
 def route(tasks=Depends(task_manager.get_tasks)):
@@ -170,7 +193,7 @@ fastapi-taskflow supports running multiple instances behind a load balancer when
 
 **Same host, multiple processes** -- use SQLite. All instances share the same file. Requeue claiming is atomic so only one instance picks up each task on restart.
 
-**Multiple hosts** -- use Redis. All instances share the same Redis instance. Idempotency keys, requeue claiming, and completed task history all work across hosts.
+**Multiple hosts** -- use Redis, PostgreSQL, or MySQL. All instances share the same backend. Idempotency keys, requeue claiming, and completed task history all work across hosts.
 
 ```python
 from fastapi_taskflow.backends import RedisBackend
@@ -181,7 +204,7 @@ task_manager = TaskManager(
 )
 ```
 
-**Dashboard in multi-instance deployments** -- the dashboard shows live tasks for the instance it is connected to. Completed tasks from all instances are visible via the shared backend (with a short cache window). For accurate live task visibility, route dashboard traffic to a single instance using sticky sessions at the load balancer. See the [multi-instance guide](docs/guide/multi-instance.md) for examples.
+**Dashboard in multi-instance deployments** -- the dashboard shows live tasks for the instance it is connected to. Completed tasks from all instances are visible via the shared backend (with a short cache window). For accurate live task visibility, route dashboard traffic to a single instance using sticky sessions at the load balancer.
 
 **Known caveats:**
 - Live `PENDING` and `RUNNING` tasks from other instances are not visible in real time. Each instance only holds its own in-memory state.
@@ -228,8 +251,6 @@ Built-in observers:
 | `StdoutLogger` | Prints to stdout. Suitable for containers with a log agent. |
 | `InMemoryLogger` | Captures events in memory for test assertions. |
 
-The `log_file` shorthand on `TaskManager` remains fully supported and creates a `FileLogger` internally.
-
 ## Tags
 
 Attach key/value labels to a task at enqueue time. Tags flow through to every log and lifecycle event.
@@ -268,9 +289,9 @@ Args and kwargs are encrypted at `add_task()` time and decrypted only inside the
 
 By default, tasks share the event loop and thread pool with request handlers. Under burst task load this can increase request latency. Both controls are opt-in and do not change existing behaviour when not set.
 
-**`max_concurrent_tasks`** — caps how many async tasks hold event loop time simultaneously via an `asyncio.Semaphore`. Tasks waiting for a slot are parked without blocking the loop.
+**`max_concurrent_tasks`** -- caps how many async tasks hold event loop time simultaneously via an `asyncio.Semaphore`. Tasks waiting for a slot are parked without blocking the loop.
 
-**`max_sync_threads`** — runs sync task functions in a dedicated `ThreadPoolExecutor`, isolated from the default pool used by sync request handlers.
+**`max_sync_threads`** -- runs sync task functions in a dedicated `ThreadPoolExecutor`, isolated from the default pool used by sync request handlers.
 
 ```python
 task_manager = TaskManager(
@@ -297,7 +318,6 @@ def generate_report(user_id: int) -> None:
 
 @app.post("/otp")
 async def otp(phone: str, tasks=Depends(task_manager.get_tasks)):
-    # Runs before the report even if the report was queued first.
     task_id = tasks.add_task(send_otp, phone)
     return {"task_id": task_id}
 ```
@@ -314,18 +334,16 @@ Tasks with no priority route through Starlette's normal background task list unc
 
 ## Eager dispatch
 
-Set `eager=True` to start a task via `asyncio.create_task` the moment `add_task()` is called, before FastAPI sends the response. The task is tracked and retried exactly like a normal task.
+Set `eager=True` to start a task via `asyncio.create_task` the moment `add_task()` is called, before FastAPI sends the response. Useful for batch endpoints where multiple tasks are added in a single request handler and you want them to run concurrently rather than queued sequentially.
 
 ```python
-@task_manager.task(eager=True)
-async def notify_user(user_id: int, body: str) -> None:
-    await push_service.send(user_id, body)
-
-@app.post("/action")
-async def action(user_id: int, tasks=Depends(task_manager.get_tasks)):
-    task_id = tasks.add_task(notify_user, user_id, "Your request is processing")
-    # notify_user is already running here, before the response goes out.
-    return {"task_id": task_id}
+@app.post("/batch")
+async def batch(items: list[str], tasks=Depends(task_manager.get_tasks)):
+    task_ids = []
+    for item in items:
+        task_id = tasks.add_task(process_item, item, eager=True)
+        task_ids.append(task_id)
+    return {"task_ids": task_ids}
 ```
 
 Override per call with `tasks.add_task(func, arg, eager=True)`. When `priority=` is also set, the priority queue governs dispatch and `eager` is ignored.
@@ -362,7 +380,7 @@ async def morning_report() -> None:
 
 Cron expressions require `pip install "fastapi-taskflow[scheduler]"`. Interval-based schedules have no extra dependencies. Cron expressions default to UTC. Pass any IANA timezone name with `timezone=` to evaluate in local time.
 
-Scheduled tasks also appear in the task registry, so they can be enqueued manually from a route alongside their automatic schedule. In multi-instance deployments, a distributed lock ensures only one instance fires each entry per interval.
+In multi-instance deployments, a distributed lock ensures only one instance fires each scheduled entry per interval.
 
 ## Custom dashboard title
 
@@ -388,7 +406,9 @@ Each line has the format `[task_id] [func_name] 2026-01-01T12:00:00 message`. Fo
 
 ## What this is not
 
-fastapi-taskflow does not compete with Celery, ARQ, Taskiq, or Dramatiq. Those tools are built for distributed workers, message brokers, and high-throughput task routing. This library is for teams using FastAPI's native `BackgroundTasks` who want retries, visibility, and resilience without adding worker infrastructure.
+fastapi-taskflow does not compete with Celery, ARQ, Taskiq, or Dramatiq. Those tools are built for distributed workers, message brokers, and high-throughput task routing across separate machines.
+
+This library is for teams using FastAPI's native `BackgroundTasks` who want retries, visibility, and resilience without adding worker infrastructure. If your tasks need to run on dedicated worker processes completely separate from your web application, use a proper task queue.
 
 ## Contributing
 

@@ -126,7 +126,7 @@ async def test_sse_generator_pushes_json_state():
     from fastapi import Request
     from unittest.mock import AsyncMock, MagicMock
 
-    from fastapi_taskflow.dashboard import _sse_generator
+    from fastapi_taskflow.dashboard.sse import _sse_generator
 
     _, tm = _build_app()
     mock_req = MagicMock(spec=Request)
