@@ -424,6 +424,13 @@ async def _execute_task_inner(
 
             except Exception as exc:  # noqa: BLE001
                 _inner_task = None
+                # Worker was killed by SIGINT (Ctrl+C). Leave the record as
+                # RUNNING so save_interrupted_tasks() can classify it as
+                # INTERRUPTED or re-queue it as PENDING based on the task's
+                # requeue_on_interrupt flag. Do not retry, the server is
+                # shutting down.
+                if getattr(exc, "_was_interrupted", False):
+                    return
                 last_error = exc
                 # For process executor tasks, _WorkerException attaches the
                 # full worker-side traceback as _worker_traceback so the
@@ -433,6 +440,13 @@ async def _execute_task_inner(
                 )
 
         await _drain_pending(_pending_log)
+
+        # If save_interrupted_tasks() already finalised this record (e.g. set
+        # it to PENDING for requeue or INTERRUPTED during graceful shutdown),
+        # don't override it with FAILED.
+        _current = store.get(task_id)
+        if _current is not None and _current.status != TaskStatus.RUNNING:
+            return
 
         end_time = datetime.now(timezone.utc)
         store.update(
@@ -471,23 +485,34 @@ async def _execute_task_inner(
         end_time = datetime.now(timezone.utc)
         current = store.get(task_id)
         if current is not None and current.status == TaskStatus.RUNNING:
-            store.update(task_id, status=TaskStatus.CANCELLED, end_time=end_time)
-            if logger is not None:
-                duration = (end_time - exec_start).total_seconds()
-                await logger.on_lifecycle(
-                    LifecycleEvent(
-                        task_id=task_id,
-                        func_name=func_name,
-                        status=TaskStatus.CANCELLED,
-                        timestamp=end_time,
-                        attempt=_state["attempt"],
-                        retries_used=_state["attempt"],
-                        duration=duration,
-                        tags=tags,
+            if store._shutting_down and config.requeue_on_interrupt:
+                # Shutdown-driven cancellation, task opted into requeue.
+                # Mark PENDING so flush_pending() saves it to the requeue store.
+                store.update(task_id, status=TaskStatus.PENDING)
+            elif store._shutting_down:
+                # Shutdown-driven cancellation, task did not opt into requeue.
+                # Leave status as RUNNING so flush_pending() classifies it as
+                # INTERRUPTED, consistent with process executor behavior.
+                pass
+            else:
+                # User-initiated cancel via the dashboard or cancel API.
+                store.update(task_id, status=TaskStatus.CANCELLED, end_time=end_time)
+                if logger is not None:
+                    duration = (end_time - exec_start).total_seconds()
+                    await logger.on_lifecycle(
+                        LifecycleEvent(
+                            task_id=task_id,
+                            func_name=func_name,
+                            status=TaskStatus.CANCELLED,
+                            timestamp=end_time,
+                            attempt=_state["attempt"],
+                            retries_used=_state["attempt"],
+                            duration=duration,
+                            tags=tags,
+                        )
                     )
-                )
-            if on_success is not None:
-                await on_success(task_id)
+                if on_success is not None:
+                    await on_success(task_id)
 
     finally:
         if running_tasks is not None:

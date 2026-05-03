@@ -240,6 +240,18 @@ class _WorkerException(Exception):
         return (self.__class__, (str(self.args[0]), self.tb_str, self.log_records))
 
 
+class _WorkerInterrupted(_WorkerException):
+    """Worker was interrupted by SIGINT (Ctrl+C).
+
+    Raised by :func:`_worker_entrypoint` instead of the generic
+    :class:`_WorkerException` when the task function is cut short by
+    ``KeyboardInterrupt``.  The parent detects this subclass and leaves the
+    task record as ``RUNNING`` so :func:`save_interrupted_tasks` can classify
+    it correctly (``INTERRUPTED`` or re-queued as ``PENDING``) rather than
+    marking it ``FAILED``.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Worker-side helpers (must be module-level to be picklable)
 # ---------------------------------------------------------------------------
@@ -389,6 +401,13 @@ def _worker_entrypoint(payload: tuple) -> _WorkerOutcome:
         else:
             result = func(*args, **kwargs)
         return _WorkerOutcome(result=result, log_records=log_records)
+    except KeyboardInterrupt:
+        # SIGINT delivered to the worker's process group (Ctrl+C). Raise the
+        # dedicated subclass so the parent can distinguish a signal-driven
+        # interrupt from a genuine task failure and leave the record as
+        # RUNNING for save_interrupted_tasks() to handle.
+        tb_str = traceback.format_exc()
+        raise _WorkerInterrupted("KeyboardInterrupt", tb_str, log_records)
     except BaseException as exc:
         tb_str = traceback.format_exc()
         exc_str = f"{type(exc).__name__}: {exc}"
@@ -555,6 +574,9 @@ class ProcessExecutor:
                     pass
             err = RuntimeError(str(exc))
             err._worker_traceback = exc.tb_str  # type: ignore[attr-defined]
+            # Signal-driven interrupt: tag the error so execute_task can
+            # leave the record as RUNNING for save_interrupted_tasks().
+            err._was_interrupted = isinstance(exc, _WorkerInterrupted)  # type: ignore[attr-defined]
             raise err from exc
         except concurrent.futures.BrokenExecutor as exc:
             # A worker died (OOM kill, segfault, etc.). Reset the pool so the

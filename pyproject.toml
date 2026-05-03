@@ -1,6 +1,6 @@
 [project]
 name = "fastapi-taskflow"
-version = "0.8.0"
+version = "0.8.1"
 description = "Retries, persistence, and visibility for FastAPI's BackgroundTasks. Production-grade background tasks. No workers, no brokers, drop-in."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -52,7 +52,7 @@ dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23",
     "httpx>=0.24",
-    "uvicorn>=0.22",
+    "uvicorn>=0.30",
 ]
 docs = [
     "mkdocs-material>=9.5",

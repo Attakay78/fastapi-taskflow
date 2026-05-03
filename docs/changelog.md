@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.8.1
+
+### Bug fixes
+
+- Fixed a process hang at shutdown when tasks were still running.
+- Fixed running tasks showing as `CANCELLED` instead of `INTERRUPTED` after a server shutdown.
+- Fixed requeued tasks not showing their executor in the dashboard after a restart.
+
+---
+
 ## v0.8.0
 
 Adds a process executor for CPU-bound tasks, PostgreSQL and MySQL snapshot backends, readable duration formatting in the dashboard, and bug fixes.

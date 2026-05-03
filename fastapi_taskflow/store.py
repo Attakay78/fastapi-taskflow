@@ -21,6 +21,12 @@ class TaskStore:
         self._tasks: dict[str, TaskRecord] = {}
         self._lock = threading.Lock()
 
+        # Set to True when notify_shutdown() is called (SIGINT/SIGTERM received).
+        # Used by execute_task to distinguish shutdown-driven CancelledError from
+        # user-initiated task cancellation, so requeue_on_interrupt tasks are
+        # saved as PENDING instead of CANCELLED during graceful shutdown.
+        self._shutting_down: bool = False
+
         # One queue per connected dashboard client. maxsize=1 coalesces rapid
         # back-to-back updates: if a notification is already waiting in the
         # queue, put_nowait silently drops the duplicate.
@@ -62,6 +68,33 @@ class TaskStore:
                 q.put_nowait("change")
             except asyncio.QueueFull:
                 pass  # a notification is already pending; drop the duplicate
+
+    def notify_shutdown(self) -> None:
+        """Deliver a shutdown sentinel (``None``) to every SSE subscriber queue.
+
+        Drains any pending "change" notification first so the sentinel always
+        fits within the ``maxsize=1`` queue. The SSE generator exits when it
+        receives ``None`` from ``q.get()``, allowing uvicorn to close the
+        long-lived connection without waiting for the browser to disconnect.
+
+        Also sets ``_shutting_down`` so that :func:`~fastapi_taskflow.executor.execute_task`
+        can distinguish a shutdown-driven ``CancelledError`` from a user-initiated
+        task cancellation.
+        """
+        self._shutting_down = True
+        with self._queues_lock:
+            queues = list(self._queues)
+
+        for q in queues:
+            # Drain any coalesced "change" to make room for the sentinel.
+            try:
+                q.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                q.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
 
     def _notify_change(self) -> None:
         """Schedule ``_fan_out`` onto the event loop from any calling context.

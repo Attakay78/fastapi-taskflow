@@ -124,7 +124,10 @@ async def _sse_generator(
       - Backend configured: emits a full state refresh so completed tasks
         from other instances that flushed to the shared backend are picked up.
         Frequency controlled by *poll_interval* (default 30s).
-    * Cleans up the subscriber queue on disconnect or CancelledError.
+    * Exits immediately when the app shuts down (shutdown_event set), so
+      uvicorn can close the long-lived SSE connection without waiting for
+      the browser to close the tab first.
+    * Cleans up the subscriber queue on disconnect, shutdown, or CancelledError.
     """
     q = task_manager.store.add_subscriber()
     has_backend = task_manager._scheduler is not None
@@ -140,8 +143,12 @@ async def _sse_generator(
             if await request.is_disconnected():
                 break
             try:
-                await asyncio.wait_for(q.get(), timeout=poll_interval)
-                # Local mutation — always emit a fresh state.
+                msg = await asyncio.wait_for(q.get(), timeout=poll_interval)
+                # None is the shutdown sentinel, exit so uvicorn can close
+                # the connection without waiting for the browser to disconnect.
+                if msg is None:
+                    break
+                # Local mutation always emit a fresh state.
                 tasks = await task_manager.merged_list()
                 yield _build_sse_state(
                     tasks,
@@ -150,12 +157,8 @@ async def _sse_generator(
                 )
             except asyncio.TimeoutError:
                 if not has_backend:
-                    # Single instance, no backend — keep the connection alive
-                    # without an unnecessary backend read.
                     yield ": keep-alive\n\n"
                 else:
-                    # Backend present — refresh to pick up other instances'
-                    # completed tasks that flushed since the last local event.
                     tasks = await task_manager.merged_list()
                     yield _build_sse_state(
                         tasks,

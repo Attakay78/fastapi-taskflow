@@ -405,7 +405,7 @@ wheels = [
 
 [[package]]
 name = "fastapi-taskflow"
-version = "0.8.0"
+version = "0.8.1"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
@@ -485,7 +485,7 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.7" },
     { name = "redis", extras = ["asyncio"], marker = "extra == 'all'", specifier = ">=5.0" },
     { name = "redis", extras = ["asyncio"], marker = "extra == 'redis'", specifier = ">=5.0" },
-    { name = "uvicorn", marker = "extra == 'dev'", specifier = ">=0.22" },
+    { name = "uvicorn", marker = "extra == 'dev'", specifier = ">=0.30" },
 ]
 
 [package.metadata.requires-dev]

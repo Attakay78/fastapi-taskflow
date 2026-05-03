@@ -35,13 +35,18 @@ class TaskConfig:
         delay: Seconds to wait before the first retry.
         backoff: Multiplier applied to ``delay`` on each subsequent retry.
             Use ``2.0`` for exponential backoff (1s, 2s, 4s, ...).
-        persist: Reserved for future use.
+        persist: Activates the requeue machinery for this function without
+            setting ``requeue_pending=True`` on the manager. Tasks that were
+            never started at shutdown will be re-dispatched on the next
+            startup. Tasks that were mid-execution are only re-dispatched if
+            ``requeue_on_interrupt`` is also ``True``.
         name: Display name used in logs and the dashboard. Defaults to the
             decorated function's ``__name__``.
-        requeue_on_interrupt: When ``True``, a task that was mid-execution
-            at shutdown is saved as PENDING and re-dispatched on the next
-            startup. Only set this on functions that are safe to run from
-            scratch even if they partially completed (idempotent tasks).
+        requeue_on_interrupt: Re-dispatch this task on startup if it was
+            mid-execution when the server shut down. Requires ``persist=True``
+            or ``requeue_pending=True`` on the manager, otherwise the requeue
+            step never runs. Only set this on functions that are safe to run
+            from scratch even if they partially completed.
         eager: When ``True``, the task is dispatched via ``asyncio.create_task``
             immediately when ``add_task()`` is called rather than waiting for
             FastAPI to send the response. Per-call ``eager`` on ``add_task()``

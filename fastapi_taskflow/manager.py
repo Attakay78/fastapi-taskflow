@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import collections
 import concurrent.futures
+import concurrent.futures.thread as _cft
 import inspect
+import threading
 import time
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
+import weakref
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, cast
 
 from fastapi import BackgroundTasks
 
@@ -28,6 +31,47 @@ if TYPE_CHECKING:
     from .models import TaskRecord
     from .periodic import PeriodicScheduler
     from .wrapper import ManagedBackgroundTasks
+
+
+class _DaemonThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+    """ThreadPoolExecutor whose worker threads are daemon threads.
+
+    Daemon threads do not prevent process exit. When a thread task is still
+    running at shutdown, the task has already been saved as PENDING (by the
+    CancelledError handler in execute_task), so letting the thread die with
+    the process is safe, it will be requeued on the next startup.
+
+    Without this, Python 3.13's asyncio.run() calls shutdown_default_executor(300)
+    and blocks for up to 5 minutes waiting for non-daemon threads.
+    """
+
+    def _adjust_thread_count(self) -> None:
+        # _idle_semaphore was added in Python 3.12; guard for older versions.
+        idle = getattr(self, "_idle_semaphore", None)
+        if idle is not None and idle.acquire(timeout=0):
+            return
+
+        def weakref_cb(_, q=self._work_queue):
+            q.put(None)
+
+        num_threads = len(self._threads)
+        if num_threads < self._max_workers:
+            t = threading.Thread(
+                target=_cft._worker,
+                args=(
+                    weakref.ref(self, weakref_cb),
+                    self._work_queue,
+                    self._initializer,
+                    self._initargs,
+                ),
+            )
+            t.daemon = True
+            t.start()
+            cast(set, self._threads).add(t)
+            # Do NOT add to _cft._threads_queues. The atexit _python_exit()
+            # handler joins every thread in that dict; joining a running daemon
+            # thread blocks process exit. Daemon threads are killed automatically
+            # when the process exits, so we don't need to join them.
 
 
 class TaskManager:
@@ -210,12 +254,23 @@ class TaskManager:
             else None
         )
 
+        # When no user-supplied pool, use a daemon-thread pool so that a thread
+        # task still running at shutdown does not block asyncio.run()'s
+        # shutdown_default_executor() call (which waits up to 300 s in Python 3.13+).
+        self._default_thread_pool: _DaemonThreadPoolExecutor | None = (
+            _DaemonThreadPoolExecutor(thread_name_prefix="taskflow-thread")
+            if max_sync_threads is None
+            else None
+        )
+
+        _thread_pool = self._sync_executor or self._default_thread_pool
+
         # Executor registry: keyed by the string values accepted by executor= on @task.
         # LazyProcessExecutor is always registered but creates no OS processes until
         # the first process executor task is dispatched.
         self._executors: dict[str, "Executor"] = {
             "async": AsyncExecutor(semaphore=_semaphore),
-            "thread": ThreadExecutor(pool=self._sync_executor),
+            "thread": ThreadExecutor(pool=_thread_pool),
             "process": LazyProcessExecutor(
                 max_workers=max_process_workers,
                 shutdown_timeout=process_shutdown_timeout,
@@ -280,6 +335,9 @@ class TaskManager:
         self._priority_worker_task: Optional[asyncio.Task] = None
 
         self._app: Optional["FastAPI"] = None
+        self._shutdown_event: asyncio.Event | None = None
+        self._prev_sigint: Any = None
+        self._prev_sigterm: Any = None
         self._scheduler = None
         self._periodic_scheduler: Optional["PeriodicScheduler"] = None
         if snapshot_backend is not None or snapshot_db is not None:
@@ -350,6 +408,8 @@ class TaskManager:
                 yield
                 await task_manager.shutdown()
         """
+        self._shutdown_event = asyncio.Event()
+        self._install_signal_handlers()
         if self._scheduler is not None:
             await self._scheduler.load()
             if self._scheduler._requeue_pending:
@@ -388,6 +448,9 @@ class TaskManager:
                 yield
                 await task_manager.shutdown()
         """
+        if self._shutdown_event is not None:
+            self._shutdown_event.set()
+        self.store.notify_shutdown()
         if self._priority_worker_task is not None:
             self._priority_worker_task.cancel()
             try:
@@ -400,17 +463,75 @@ class TaskManager:
         if self._scheduler is not None:
             self._scheduler.stop()
             await self._scheduler.flush()
-            if self._scheduler._requeue_pending:
-                await self._scheduler.flush_pending()
+            await self._scheduler.flush_pending()
         if self.logger is not None:
             await self.logger.close()
         if self._sync_executor is not None:
             self._sync_executor.shutdown(wait=True)
+        if self._default_thread_pool is not None:
+            # Daemon threads die with the process, no need to wait.
+            # cancel_futures drops queued-but-not-started items; running items
+            # were already marked PENDING by the CancelledError handler.
+            self._default_thread_pool.shutdown(wait=False, cancel_futures=True)
         # Drain the process executor pool if it was started, waiting up to the
         # configured timeout before forcefully terminating remaining workers.
         process_executor = self._executors.get("process")
         if process_executor is not None:
             await process_executor.shutdown(timeout=self._process_shutdown_timeout)
+        self._restore_signal_handlers()
+
+    def _install_signal_handlers(self) -> None:
+        """Chain our shutdown notification onto the OS signal handlers.
+
+        Called from startup() after uvicorn has already installed its own
+        SIGINT/SIGTERM handlers. We wrap them so that when Ctrl+C arrives we
+        immediately push the shutdown sentinel into every SSE subscriber queue
+        — before uvicorn even starts its shutdown sequence. By the time uvicorn
+        reaches its "waiting for connections" loop, the SSE connections are
+        already closed and it exits without waiting.
+
+        Uses signal.signal() (not loop.add_signal_handler) because uvicorn
+        also uses signal.signal(), and we need to chain, not replace.
+        call_soon_threadsafe is used because signal handlers interrupt the
+        event loop and asyncio Queue operations must run inside the loop.
+        """
+        import signal as _signal
+
+        loop = asyncio.get_running_loop()
+        store = self.store
+        shutdown_event = self._shutdown_event
+
+        self._prev_sigint = _signal.getsignal(_signal.SIGINT)
+        self._prev_sigterm = _signal.getsignal(_signal.SIGTERM)
+
+        def _handler(sig: int, frame: Any) -> None:
+            try:
+                loop.call_soon_threadsafe(store.notify_shutdown)
+                if shutdown_event is not None:
+                    loop.call_soon_threadsafe(shutdown_event.set)
+            except RuntimeError:
+                pass
+            prev = self._prev_sigint if sig == _signal.SIGINT else self._prev_sigterm
+            if callable(prev):
+                prev(sig, frame)
+
+        try:
+            _signal.signal(_signal.SIGINT, _handler)
+            _signal.signal(_signal.SIGTERM, _handler)
+        except (OSError, ValueError):
+            pass  # not the main thread, or signal not supported
+
+    def _restore_signal_handlers(self) -> None:
+        """Restore the signal handlers saved by _install_signal_handlers."""
+        import signal as _signal
+
+        try:
+            if self._prev_sigint is not None:
+                _signal.signal(_signal.SIGINT, self._prev_sigint)
+            if self._prev_sigterm is not None:
+                _signal.signal(_signal.SIGTERM, self._prev_sigterm)
+        except (OSError, ValueError):
+            pass
 
     # ------------------------------------------------------------------
     # Executor helpers
@@ -534,15 +655,16 @@ class TaskManager:
             backoff: Multiplier applied to *delay* on each retry (e.g. ``2.0``
                 for exponential backoff).
             name: Override the display name in logs and the dashboard.
-            persist: Save this task record to the backend for requeue on
-                restart. Equivalent to passing ``requeue_pending=True`` at the
-                :class:`~fastapi_taskflow.TaskManager` level but scoped to this
-                function only.
-            requeue_on_interrupt: When ``True`` (and ``requeue_pending=True`` on
-                this ``TaskManager``), a task interrupted at shutdown is saved as
-                PENDING and re-dispatched on the next startup. Only use this for
-                idempotent functions -- those that are safe to run from scratch
-                even if they partially completed before the crash.
+            persist: Activates the requeue machinery for this function without
+                setting ``requeue_pending=True`` on the manager. Tasks that were
+                never started at shutdown will be re-dispatched on the next
+                startup. Tasks that were mid-execution are only re-dispatched if
+                ``requeue_on_interrupt`` is also ``True``.
+            requeue_on_interrupt: Re-dispatch this task on startup if it was
+                mid-execution when the server shut down. Requires ``persist=True``
+                or ``requeue_pending=True`` on the manager, otherwise the requeue
+                step never runs. Only use this on functions that are safe to run
+                from scratch even if they partially completed.
             eager: When ``True``, dispatch via ``asyncio.create_task``
                 immediately when ``add_task()`` is called, before FastAPI sends
                 the response. Per-call ``eager`` on ``add_task()`` overrides
@@ -587,6 +709,11 @@ class TaskManager:
             if executor is not None:
                 self._executors[executor].validate(func)
             self.registry.register(func, config)
+            # persist=True on the decorator is equivalent to requeue_pending=True
+            # on the TaskManager, scoped to this function. Promote the flag so
+            # the scheduler's flush_pending/requeue paths activate automatically.
+            if config.persist and self._scheduler is not None:
+                self._scheduler._requeue_pending = True
             return func
 
         return decorator

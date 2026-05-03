@@ -167,6 +167,7 @@ class SnapshotScheduler:
             self._task_manager.store.restore(record)
 
             executor_obj = self._task_manager._resolve_executor(func, config)
+            self._task_manager.store.update(record.task_id, executor=executor_obj.name)
             asyncio.create_task(
                 execute_task(
                     func,
@@ -189,7 +190,7 @@ class SnapshotScheduler:
                 record.func_name,
             )
 
-        # clear_pending is now a safety net — backends with atomic claim_pending
+        # clear_pending is now a safety net, backends with atomic claim_pending
         # already deleted each record individually above. For custom backends
         # using the default no-op claim_pending this clears the full list.
         await self._backend.clear_pending()
@@ -267,7 +268,12 @@ class SnapshotScheduler:
 
         for t in unfinished:
             if t.status == TaskStatus.PENDING:
-                to_requeue.append(t)
+                # Only save never-started PENDING tasks when the global
+                # requeue_pending flag is active.  Without it there is no
+                # corresponding requeue() call on the next startup, so saving
+                # them would just leak records into the pending store forever.
+                if self._requeue_pending:
+                    to_requeue.append(t)
             else:
                 # RUNNING — check whether the task opted in to requeue on interrupt
                 result = self._task_manager.registry.get_by_name(t.func_name)
