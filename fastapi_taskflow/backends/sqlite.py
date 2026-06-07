@@ -59,6 +59,13 @@ CREATE TABLE IF NOT EXISTS task_schedule_locks (
 )
 """
 
+_CREATE_METADATA = """
+CREATE TABLE IF NOT EXISTS task_metadata (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+)
+"""
+
 # Migrations applied to databases created before a column existed.
 _MIGRATIONS = [
     "ALTER TABLE task_snapshots ADD COLUMN args_json TEXT",
@@ -70,21 +77,23 @@ _MIGRATIONS = [
     "ALTER TABLE task_snapshots ADD COLUMN source TEXT DEFAULT 'manual'",
     "ALTER TABLE task_snapshots ADD COLUMN priority INTEGER",
     "ALTER TABLE task_snapshots ADD COLUMN executor TEXT",
+    "ALTER TABLE task_snapshots ADD COLUMN queue TEXT DEFAULT 'default'",
+    "ALTER TABLE task_pending_requeue ADD COLUMN queue TEXT DEFAULT 'default'",
 ]
 
 _UPSERT_HISTORY = """
 INSERT OR REPLACE INTO task_snapshots
     (task_id, func_name, status, created_at, start_time, end_time,
      duration, retries_used, error, snapshotted_at, args_json, kwargs_json,
-     logs_json, stacktrace, encrypted_payload, source, priority, executor)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     logs_json, stacktrace, encrypted_payload, source, priority, executor, queue)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _UPSERT_PENDING = """
 INSERT OR REPLACE INTO task_pending_requeue
     (task_id, func_name, created_at, retries_used, args_json, kwargs_json,
-     encrypted_payload)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+     encrypted_payload, queue)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -132,6 +141,7 @@ class SqliteBackend(SnapshotBackend):
             conn.execute(_CREATE_PENDING)
             conn.execute(_CREATE_IDEMPOTENCY)
             conn.execute(_CREATE_SCHEDULE_LOCKS)
+            conn.execute(_CREATE_METADATA)
             for migration in _MIGRATIONS:
                 try:
                     conn.execute(migration)
@@ -164,6 +174,7 @@ class SqliteBackend(SnapshotBackend):
                         t.source,
                         t.priority,
                         t.executor,
+                        t.queue,
                     )
                     for t in records
                 ),
@@ -188,6 +199,7 @@ class SqliteBackend(SnapshotBackend):
                             t.encrypted_payload.decode()
                             if t.encrypted_payload
                             else None,
+                            t.queue,
                         )
                         for t in records
                     ),
@@ -220,6 +232,7 @@ class SqliteBackend(SnapshotBackend):
                     else (),
                     kwargs=json.loads(d["kwargs_json"]) if d.get("kwargs_json") else {},
                     encrypted_payload=enc.encode() if enc else None,
+                    queue=d.get("queue") or "default",
                 )
             )
         return records
@@ -259,6 +272,18 @@ class SqliteBackend(SnapshotBackend):
                 " VALUES (?, ?, ?)",
                 (key, task_id, datetime.utcnow().isoformat()),
             )
+
+    def _delete_records_sync(self, task_ids: list[str]) -> int:
+        """Delete specific records from history by task ID. Returns count deleted."""
+        if not task_ids:
+            return 0
+        placeholders = ",".join("?" * len(task_ids))
+        with sqlite3.connect(self._db_path) as conn:
+            cur = conn.execute(
+                f"DELETE FROM task_snapshots WHERE task_id IN ({placeholders})",
+                task_ids,
+            )
+            return cur.rowcount
 
     def _delete_before_sync(self, cutoff: str) -> int:
         """Delete terminal records older than *cutoff* (ISO format). Returns count deleted."""
@@ -347,6 +372,7 @@ class SqliteBackend(SnapshotBackend):
                     source=d.get("source") or "manual",
                     priority=d.get("priority"),
                     executor=d.get("executor"),
+                    queue=d.get("queue") or "default",
                 )
             )
         return records
@@ -379,6 +405,9 @@ class SqliteBackend(SnapshotBackend):
     async def record_idempotency_key(self, key: str, task_id: str) -> None:
         await asyncio.to_thread(self._record_idempotency_key_sync, key, task_id)
 
+    async def delete_records(self, task_ids: list[str]) -> int:
+        return await asyncio.to_thread(self._delete_records_sync, task_ids)
+
     async def delete_before(self, cutoff: datetime) -> int:
         return await asyncio.to_thread(self._delete_before_sync, cutoff.isoformat())
 
@@ -389,6 +418,26 @@ class SqliteBackend(SnapshotBackend):
 
     async def acquire_schedule_lock(self, key: str, ttl: int) -> bool:
         return await asyncio.to_thread(self._acquire_schedule_lock_sync, key, ttl)
+
+    async def save_metadata(self, key: str, value: str) -> None:
+        def _sync() -> None:
+            with sqlite3.connect(self._db_path) as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO task_metadata (key, value) VALUES (?, ?)",
+                    (key, value),
+                )
+
+        await asyncio.to_thread(_sync)
+
+    async def load_metadata(self, key: str) -> "str | None":
+        def _sync() -> "str | None":
+            with sqlite3.connect(self._db_path) as conn:
+                row = conn.execute(
+                    "SELECT value FROM task_metadata WHERE key = ?", (key,)
+                ).fetchone()
+            return row[0] if row else None
+
+        return await asyncio.to_thread(_sync)
 
     async def close(self) -> None:
         pass  # SQLite connections are opened/closed per-operation

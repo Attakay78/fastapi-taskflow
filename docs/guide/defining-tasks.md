@@ -33,7 +33,8 @@ Without any arguments, the task runs once with no retries. This is the right sta
 | `name` | `str` | function name | Override the display name in the dashboard and logs |
 | `requeue_on_interrupt` | `bool` | `False` | Save as PENDING if interrupted at shutdown, then requeue on next startup |
 | `eager` | `bool` | `False` | Dispatch via `asyncio.create_task` immediately when `add_task()` is called, before the response is sent |
-| `priority` | `int \| None` | `None` | Route through the priority queue instead of the standard task list. Higher values run first |
+| `priority` | `int \| None` | `None` | Route through the priority queue instead of the standard task list. Higher values run first. When named queues are active, controls ordering within the target queue's heap |
+| `queue` | `str \| None` | `None` | Named queue to route this function into. Requires `queues=` on `TaskManager`. Defaults to `"default"` when the named queue system is active |
 | `executor` | `"async" \| "thread" \| "process" \| None` | `None` | Force a specific executor. `None` auto-detects: `async` for coroutines, `thread` for sync functions |
 
 **When would you use each option?**
@@ -44,6 +45,7 @@ Without any arguments, the task runs once with no retries. This is the right sta
 - `requeue_on_interrupt`: For idempotent tasks where running from scratch after an unclean shutdown is acceptable.
 - `eager`: When you need the task to start before the HTTP response goes out (for example, to guarantee ordering).
 - `priority`: When some tasks are more time-sensitive than others and you want coarse control over execution order.
+- `queue`: When different functions need separate concurrency budgets or backpressure limits.
 - `executor`: When you need explicit control over how a task runs, in particular `"process"` for CPU-bound work.
 
 ## Retry behavior
@@ -120,6 +122,7 @@ Every task moves through these states:
 ```mermaid
 stateDiagram-v2
     [*] --> PENDING : add_task() called
+    [*] --> REJECTED : queue full (named queue mode)
     PENDING --> RUNNING : execution starts
     RUNNING --> SUCCESS : function returned
     RUNNING --> FAILED : all retries exhausted
@@ -128,6 +131,7 @@ stateDiagram-v2
     RUNNING --> PENDING : shutdown during execution (requeue_on_interrupt=True)
     FAILED --> [*] : POST /tasks/{id}/retry creates new task
     INTERRUPTED --> [*] : POST /tasks/{id}/retry creates new task
+    REJECTED --> [*] : POST /tasks/{id}/retry creates new task
 ```
 
 **PENDING**: The task has been enqueued and is waiting to run.
@@ -140,9 +144,11 @@ stateDiagram-v2
 
 **INTERRUPTED**: The process shut down while the task was mid-execution and `requeue_on_interrupt` was `False` (or not set). The task did not complete.
 
-`INTERRUPTED` tasks are visible in the dashboard and queryable via the API. They are not retried automatically. Use this status to identify tasks that need manual follow-up after an unclean shutdown.
+**REJECTED**: The target named queue was at its `max_size` limit when `add_task()` was called. The enqueue was refused and `QueueFullError` was raised. Only possible when the named queue system is active with a `max_size` limit configured.
 
-`POST /tasks/{task_id}/retry` re-enqueues a `FAILED` or `INTERRUPTED` task as a brand new task with a fresh UUID. The original record is preserved in history.
+`INTERRUPTED` and `REJECTED` tasks are visible in the dashboard and queryable via the API. They are not retried automatically.
+
+`POST /tasks/{task_id}/retry` re-enqueues a `FAILED`, `INTERRUPTED`, or `REJECTED` task as a brand new task with a fresh UUID. The original record is removed when `retry_replaces_original=True` (the default).
 
 !!! warning
     Only set `requeue_on_interrupt=True` on tasks that are **idempotent**: functions where running from scratch (even after partial execution) produces the correct result. If your task sends an email or charges a card, requeing it after an interrupt could cause duplicate actions.

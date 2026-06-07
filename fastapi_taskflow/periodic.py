@@ -271,9 +271,10 @@ class PeriodicScheduler:
         backend = scheduler._backend if scheduler is not None else None
         on_success = scheduler.flush_one if scheduler is not None else None
 
-        from .executor import execute_task
+        from .executor import execute_task, make_background_func
 
         executor_obj = self._task_manager._resolve_executor(entry.func, entry.config)
+        run_queue = entry.config.queue or "default"
 
         self._task_manager.store.create(
             task_id,
@@ -282,23 +283,44 @@ class PeriodicScheduler:
             {},
             source="scheduled",
             executor=executor_obj.name,
+            queue=run_queue,
         )
-        asyncio.create_task(
-            execute_task(
+
+        if self._task_manager._queues:
+            wrapped = make_background_func(
                 entry.func,
                 task_id,
                 entry.config,
                 self._task_manager.store,
                 (),
                 {},
-                executor_obj=executor_obj,
                 backend=backend,
                 on_success=on_success,
                 logger=self._task_manager.logger,
                 encryptor=self._task_manager.fernet,
+                executor_obj=executor_obj,
                 running_tasks=self._task_manager._running_tasks,
             )
-        )
+            self._task_manager._get_queue(run_queue).enqueue(
+                task_id, entry.config.priority, wrapped
+            )
+        else:
+            asyncio.create_task(
+                execute_task(
+                    entry.func,
+                    task_id,
+                    entry.config,
+                    self._task_manager.store,
+                    (),
+                    {},
+                    executor_obj=executor_obj,
+                    backend=backend,
+                    on_success=on_success,
+                    logger=self._task_manager.logger,
+                    encryptor=self._task_manager.fernet,
+                    running_tasks=self._task_manager._running_tasks,
+                )
+            )
 
         logger.info(
             "fastapi-taskflow: fired scheduled task %s (%s)",

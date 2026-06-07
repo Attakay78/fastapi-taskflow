@@ -37,8 +37,8 @@ from .loggers import (
     StdoutLogger,
     TaskObserver,
 )
-from .manager import TaskManager
-from .models import TaskConfig, TaskRecord, TaskStatus
+from .manager import QueueFullError, TaskManager
+from .models import QueueConfig, TaskConfig, TaskRecord, TaskStatus
 from .snapshot import SnapshotScheduler
 from .task_logging import TaskContext, get_task_context, task_log
 from .wrapper import ManagedBackgroundTasks
@@ -51,6 +51,8 @@ __all__ = [
     "TaskStatus",
     "TaskRecord",
     "TaskConfig",
+    "QueueConfig",
+    "QueueFullError",
     "SnapshotScheduler",
     "SnapshotBackend",
     "SqliteBackend",

@@ -1,6 +1,6 @@
 # Multi-Instance Deployments
 
-This page covers the two main ways to run fastapi-taskflow with multiple instances, how task history is shared between them, and how to configure your load balancer so the dashboard works correctly.
+This page covers the two main ways to run fastapi-taskflow with multiple instances, how task history and live task state are shared between them, and how to configure your load balancer so the dashboard works correctly.
 
 ## Two deployment topologies
 
@@ -14,7 +14,7 @@ How you configure fastapi-taskflow depends on where your instances run.
 
 Point every worker at the same database file:
 
-```python hl_lines="4 5"
+```python
 from fastapi_taskflow import TaskManager
 
 task_manager = TaskManager(
@@ -36,7 +36,7 @@ Install the Redis extra and point every instance at a shared Redis server:
 pip install "fastapi-taskflow[redis]"
 ```
 
-```python hl_lines="5 6"
+```python
 from fastapi_taskflow import TaskManager
 from fastapi_taskflow.backends import RedisBackend
 
@@ -57,41 +57,92 @@ All instances share the same Redis backend. The following features work across h
 
 Completed tasks (SUCCESS, FAILED, INTERRUPTED) are flushed to the shared backend. Any instance can read them back and show them in its dashboard history view.
 
-Live tasks (PENDING, RUNNING) are held in each instance's in-memory store. They are not pushed to the shared backend until they complete, so other instances cannot see them in real time.
+Live tasks (PENDING, RUNNING) are held in each instance's in-memory store. Without instance registration, they are not pushed to the shared backend until they complete, so other instances cannot see them in real time.
+
+## Instance registration and fan-out
+
+When you set `instance_url` on `TaskManager`, each instance registers itself in the shared backend under a metadata key. The dashboard can then fan out to all registered peers and return a unified view of live tasks from every instance.
+
+```python
+from fastapi_taskflow import TaskManager
+from fastapi_taskflow.backends import RedisBackend
+
+task_manager = TaskManager(
+    snapshot_backend=RedisBackend("redis://redis:6379/0"),
+    instance_url="http://10.0.0.1:8000",
+)
+```
+
+When `instance_url` is set:
+
+1. This instance writes its URL and a heartbeat timestamp to the shared backend registry at startup.
+2. The heartbeat refreshes every `registry_heartbeat` seconds (default 30).
+3. When `merged_list()` runs (on every dashboard load and SSE tick), it reads the registry, finds live peers, and fans out to each peer's `/__peer/tasks` endpoint concurrently.
+4. Peer tasks are merged with this instance's local tasks and the backend snapshot. Local in-memory tasks always win on conflict; peer tasks override the backend snapshot for the same task ID.
+5. At shutdown, this instance removes itself from the registry.
+
+Peers that are unreachable or return an error are skipped without affecting the response. An instance is excluded from the peer list when its last heartbeat is older than `registry_ttl` seconds (default 90).
+
+### Same-machine multiple instances
+
+This works for separate processes on the same machine, each listening on a different port:
+
+```python
+import os
+
+task_manager = TaskManager(
+    snapshot_backend=RedisBackend("redis://localhost:6379/0"),
+    instance_url=os.environ["INSTANCE_URL"],  # e.g. "http://localhost:8001"
+)
+```
+
+```bash
+INSTANCE_URL=http://localhost:8001 uvicorn app:app --port 8001
+INSTANCE_URL=http://localhost:8002 uvicorn app:app --port 8002
+```
+
+The dashboard on either instance shows live tasks from both.
+
+### Tasks prefix
+
+If your tasks router is mounted at a non-root prefix (for example `/api/tasks`), set `instance_tasks_prefix` so peers build the correct fan-out URL:
+
+```python
+task_manager = TaskManager(
+    snapshot_backend=RedisBackend("redis://redis:6379/0"),
+    instance_url="http://10.0.0.1:8000",
+    instance_tasks_prefix="/api/tasks",
+)
+```
+
+The fan-out URL becomes `http://10.0.0.1:8000/api/tasks/__peer/tasks`. Leave `instance_tasks_prefix` at its default (`""`) when the tasks router is mounted at root.
+
+### Registration parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `instance_url` | `None` | Public base URL of this instance. No registration or fan-out occurs when `None`. |
+| `instance_tasks_prefix` | `""` | URL prefix where the tasks router is mounted on this instance. |
+| `registry_ttl` | `90` | Seconds after which a peer entry is considered stale. Should be at least `2 * registry_heartbeat`. |
+| `registry_heartbeat` | `30` | Seconds between heartbeat writes that keep this instance's entry fresh. |
 
 ## Dashboard behaviour in multi-instance deployments
 
-The dashboard SSE stream connects to a single instance. That instance shows:
+Without `instance_url`, the dashboard SSE stream connects to a single instance. That instance shows:
 
 - Its own live tasks (PENDING, RUNNING) from local memory.
 - Completed tasks from all instances, loaded from the shared backend.
 
-The poll interval controls how often the stream refreshes from the backend to pick up other instances' completed tasks:
+With `instance_url` configured, the dashboard additionally shows:
 
-```python
-from fastapi_taskflow import TaskAdmin, TaskManager
+- Live PENDING and RUNNING tasks from all registered peer instances, fetched in real time on each SSE tick.
 
-task_manager = TaskManager(
-    snapshot_backend=RedisBackend("redis://your-redis-host:6379/0"),
-)
-app = FastAPI()
+!!! note
+    The `/__peer/tasks` endpoint returns only local in-memory tasks, not a merged view. This prevents circular fan-out chains where peers call each other recursively.
 
-TaskAdmin(app, task_manager, poll_interval=5.0)
-```
+## Dashboard and load balancers
 
-Live PENDING and RUNNING tasks from other instances are not visible. Each instance only holds its own in-memory state.
-
-To get a consistent view of live tasks, route all dashboard traffic to a single instance using sticky sessions at the load balancer.
-
-## Why sticky sessions are needed
-
-The dashboard uses Server-Sent Events (SSE), which is a persistent HTTP connection. Once the browser opens an SSE connection to an instance, it stays connected to that instance for the lifetime of the page.
-
-If the load balancer routes the initial page load to instance A but then routes the SSE connection to instance B, the dashboard will show instance B's tasks, which may be different from what the page expects.
-
-Sticky sessions fix this by ensuring both the page load and the SSE connection always reach the same instance.
-
-## Sticky session configuration
+The dashboard uses Server-Sent Events (SSE), which is a persistent HTTP connection. To avoid split views, route all dashboard traffic to the same instance, either by pinning it to a single upstream or using sticky sessions.
 
 ### Nginx: dedicated instance for the dashboard
 
@@ -121,7 +172,6 @@ server {
         proxy_set_header X-Accel-Buffering no;
 
         # Increase timeout so Nginx does not close the SSE connection early.
-        # The default 60s will drop the stream between keep-alive pings.
         proxy_read_timeout 3600s;
     }
 
@@ -133,6 +183,8 @@ server {
     }
 }
 ```
+
+When `instance_url` is configured on all instances, the pinned instance fans out to its peers and shows their live tasks too. You get a unified view without routing all traffic through one instance.
 
 ### Nginx with ip_hash
 
@@ -155,7 +207,6 @@ server {
         proxy_set_header Connection "";
         proxy_set_header Host $host;
 
-        # SSE settings
         proxy_buffering off;
         proxy_set_header X-Accel-Buffering no;
         proxy_read_timeout 3600s;
@@ -164,7 +215,7 @@ server {
 ```
 
 !!! warning
-    `ip_hash` does not rebalance well when instances are added or removed. Users behind a corporate NAT or shared proxy all share the same source IP, so they all land on the same instance, which defeats the load balancing for those users.
+    `ip_hash` does not rebalance well when instances are added or removed. Users behind a corporate NAT or shared proxy all share the same source IP, so they all land on the same instance.
 
 ### AWS Application Load Balancer
 
@@ -179,12 +230,9 @@ Enable stickiness on the target group so the ALB routes the same client to the s
 
 The ALB sets an `AWSALB` cookie on the first response. Subsequent requests from the same browser carrying that cookie are routed to the same target.
 
-!!! note
-    ALB stickiness applies at the target group level. Both the initial page load request and the SSE stream connection need to reach the same instance for the dashboard to work correctly. Because browsers open the SSE connection from the same session, the stickiness cookie covers both.
-
 ### Traefik
 
-Define a service with sticky cookies and a router that directs dashboard traffic to it. The example below uses Traefik v2 dynamic configuration in YAML:
+Define a service with sticky cookies and a router that directs dashboard traffic to it:
 
 ```yaml
 http:
@@ -208,28 +256,26 @@ http:
           - url: "http://instance-c:8000"
 ```
 
-The `httpOnly: true` flag prevents client-side JavaScript from reading the cookie.
+## Gunicorn workers
 
-If you are using Docker labels instead of a file provider:
+Gunicorn workers share a single port. The master process binds the port and distributes connections across workers. Workers are not individually addressable from the network, so `instance_url`-based fan-out does not apply to them.
 
-```yaml
-# docker-compose.yml (excerpt)
-services:
-  app:
-    labels:
-      - "traefik.http.services.app.loadbalancer.sticky.cookie=true"
-      - "traefik.http.services.app.loadbalancer.sticky.cookie.name=lb_sticky"
-      - "traefik.http.services.app.loadbalancer.sticky.cookie.httponly=true"
-```
+For gunicorn deployments:
+
+- Use a shared backend (Redis, Postgres) for cross-worker task history.
+- Completed tasks from all workers are visible via the dashboard once flushed.
+- Live PENDING and RUNNING tasks from other workers are not visible in real time.
+
+If live cross-worker visibility is a requirement, run with `--workers 1` and scale horizontally across machines using `instance_url` instead.
 
 ## Known limitations
 
 | Limitation | Notes |
 |---|---|
-| Live PENDING/RUNNING from other instances | Not visible. Each instance holds its own in-memory state only. |
+| Gunicorn multi-worker live tasks | Workers share a port and cannot be individually addressed. Only completed tasks are shared via the backend. |
 | SQLite across separate hosts | Not supported. Use Redis for multi-host deployments. |
 | Hard crash recovery | Tasks running at the time of a SIGKILL or OOM kill cannot be recovered. Only clean shutdowns write the pending store. |
-| Dashboard real-time cross-instance events | The dashboard polls the shared backend on a configurable interval (default 30 s). It does not receive push notifications from other instances. |
+| Fan-out peer timeout | Each peer fan-out request times out after 5 seconds. Slow or unreachable peers are skipped and do not block the dashboard. |
 
 ## See also
 

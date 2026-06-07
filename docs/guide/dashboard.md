@@ -34,6 +34,12 @@ See the [Authentication guide](authentication.md) for full details on protecting
 
 ---
 
+## Dark Mode
+
+The dashboard supports a light and dark theme. Use the sun/moon toggle in the top-right corner to switch. Your preference is saved in `localStorage` and restored on your next visit. All tabs, cards, and controls adjust automatically.
+
+---
+
 ## The View Tab
 
 The **View** tab is the main task table. It updates live over a Server-Sent Events stream, so you see new tasks and status changes the moment they happen, with no polling and no page refresh.
@@ -46,6 +52,7 @@ Each row in the table shows:
 |---|---|
 | ID | The task UUID, with a copy-to-clipboard button |
 | Function | The registered function name |
+| Queue | The named queue this task was routed into. Shows `default` when the named queue system is not active |
 | Status | Current status badge |
 | Duration | Wall-clock time from start to end |
 | Retries | Number of retry attempts consumed |
@@ -54,17 +61,6 @@ Each row in the table shows:
 
 Columns are sortable by clicking the column header. Your sort preference is saved in `localStorage` and restored on your next visit.
 
-### Filtering and Search
-
-Four controls sit above the table:
-
-- **Status dropdown** filters to a single status (pending, running, success, failed, interrupted, cancelled).
-- **Function dropdown** narrows the table to one registered function.
-- **Time-range picker** shows tasks created within a chosen window. You enter a number and pick a unit (minutes, hours, or days).
-- **Search bar** matches against both the task ID and the function name as you type. Your search term is persisted in `localStorage` across reloads.
-
-All active filters combine: a task must pass every one of them to appear in the table. The table paginates at 30 tasks per page.
-
 ### Metrics Row
 
 Above the table, a row of stat cards summarises the current filtered view:
@@ -72,11 +68,25 @@ Above the table, a row of stat cards summarises the current filtered view:
 | Stat | What it shows |
 |---|---|
 | Total | Count of all tasks matching the active filters |
-| Pending / Running / Success / Failed / Interrupted / Cancelled | Count per status |
+| Pending / Running / Success / Failed / Interrupted / Cancelled / Rejected | Count per status |
 | Success rate | Percentage of terminal tasks that ended in `success` |
 | Avg duration | Mean wall-clock time across completed tasks |
 | Min / Max duration | Fastest and slowest recorded run |
 | P95 duration | The 95th-percentile duration, useful for spotting outliers |
+
+### Filtering and Search
+
+Controls in the filter panel let you narrow the task table:
+
+- **Status dropdown** filters to a single status: pending, running, success, failed, interrupted, cancelled, or rejected.
+- **Function dropdown** narrows the table to one registered function.
+- **Time-range picker** shows tasks created within a chosen window. You enter a number and pick a unit (minutes, hours, or days).
+- **Queue dropdown** narrows the table to tasks in a single named queue. Only visible when the named queue system is active. Includes all queues that have had tasks routed into them.
+- **Export CSV** downloads the current filtered view.
+- **Clear history** deletes terminal tasks older than a chosen window.
+- **Search bar** sits below the metrics cards, spanning their width. It matches against both the task ID and the function name as you type. Your search term is persisted in `localStorage` across reloads.
+
+All active filters combine: a task must pass every one of them to appear in the table. The table paginates at 30 tasks per page.
 
 ---
 
@@ -124,7 +134,7 @@ The available buttons depend on the task's current status:
 |---|---|
 | `pending` | **Cancel task** sets the status to `cancelled` immediately. |
 | `running` | **Cancel task** sends a cancellation signal to the asyncio task. A note in the panel explains that sync tasks (running in a thread pool) cannot be interrupted mid-thread. |
-| `failed` or `interrupted` | **Retry this task** creates a new task with the same function, args, and kwargs. The original record stays in history unchanged. |
+| `failed`, `interrupted`, or `rejected` | **Retry this task** creates a new task with the same function, args, and kwargs. When `retry_replaces_original=True` (the default), the original record is removed after the new task is dispatched. |
 
 !!! warning
     For interrupted tasks, the retry button shows a warning that the function may have already partially executed. Only retry if you know the function is safe to run again from the beginning.
@@ -133,7 +143,7 @@ The available buttons depend on the task's current status:
 
 ## Dead Letters Tab
 
-The **Dead Letters** tab shows only tasks with status `failed`, sorted newest first. The tab badge shows the current failed count at a glance.
+The **Dead Letters** tab shows tasks with status `failed` or `rejected`, sorted newest first. The tab badge shows the current count at a glance.
 
 <a href="../../assets/images/dead_letters.png" target="_blank" class="img-link">
   <img src="../../assets/images/dead_letters.png" alt="Dead letters tab" class="screenshot" />
@@ -143,12 +153,42 @@ The **Dead Letters** tab shows only tasks with status `failed`, sorted newest fi
 
 Each row in the Dead Letters table has a checkbox. Select one or more tasks, and a bulk action bar appears with a **Replay selected** button. Clicking it re-enqueues only the checked tasks with their original function, args, and kwargs. The selection clears automatically after dispatch.
 
+When `retry_replaces_original=True` (the default), the original records are removed after the new tasks are dispatched. Only the new runs appear in the table.
+
 ### Replaying by Time Window
 
 A toolbar above the table lets you pick a time window (last 1 hour, 6 hours, 24 hours, 7 days, or all time) and click **Replay window**. A confirmation modal summarises how many tasks will be re-enqueued before anything is dispatched.
 
 !!! note
     Both replay actions are recorded in the audit log with action type `bulk_retry`.
+
+---
+
+## Queues Tab
+
+The **Queues** tab is only shown when the named queue system is active. It displays a live card for each configured named queue.
+
+Each card shows:
+
+| Field | Description |
+|---|---|
+| Queue name | The name as defined in `TaskManager(queues={...})` |
+| Type badge | `full` when the queue is at or above its `max_size` limit |
+| Concurrency | Current concurrency limit. `Unlimited` when not set |
+| Max size | Current backpressure limit. `Unlimited` when not set |
+| Pending | Tasks currently waiting in the heap |
+| Running | Tasks currently executing |
+| Finished | Terminal tasks (success, failed, interrupted, cancelled) |
+| Rejected | Tasks rejected because the queue was full |
+
+### Editing Queue Configuration
+
+Each queue card has an **Edit** button. Clicking it makes the concurrency and max_size fields editable inline. Two buttons appear:
+
+- **Save** applies the new values immediately. Changes take effect for new tasks entering the queue. In-flight tasks are not affected. The updated values are persisted to the backend and restored on the next startup.
+- **Cancel** discards the changes and returns to the read-only view.
+
+This lets you adjust queue limits at runtime without restarting the server, which is useful for throttling a queue under load or expanding capacity during a batch run.
 
 ---
 
@@ -211,7 +251,7 @@ Exported columns: `ID`, `Function`, `Status`, `Duration (ms)`, `Retries`, `Creat
 
 ## Clearing History
 
-The **Clear history** button deletes completed tasks that are older than a window you choose. Only tasks with a terminal status (`success`, `failed`, or `cancelled`) are removed. Pending and running tasks are never deleted.
+The **Clear history** button deletes completed tasks that are older than a window you choose. Only tasks with a terminal status (`success`, `failed`, `cancelled`, or `rejected`) are removed. Pending and running tasks are never deleted.
 
 You can also configure automatic retention so old records are pruned on a schedule:
 
@@ -229,9 +269,11 @@ Pruning runs approximately every 6 hours during the snapshot loop.
 
 ---
 
-## Multi-Instance Note
+## Multi-Instance Deployments
 
-When you run multiple instances behind a load balancer, the **live task table shows only the tasks running on the instance your browser's SSE connection is attached to**. Completed tasks from all instances are visible through the shared backend.
+When `instance_url` is configured on `TaskManager`, the dashboard shows a unified view of live tasks from all registered peer instances. Each SSE tick fans out to all live peers, fetches their in-memory tasks, and merges them with local tasks and the shared backend history.
+
+Without `instance_url`, the dashboard shows only the tasks from the instance your browser's SSE connection is attached to, plus completed tasks from the shared backend.
 
 !!! tip
-    For consistent live visibility, route dashboard traffic to a single instance using sticky sessions. See the [multi-instance guide](multi-instance.md) for details.
+    For consistent live visibility when `instance_url` is not configured, route dashboard traffic to a single instance using sticky sessions. See the [multi-instance guide](multi-instance.md) for details.

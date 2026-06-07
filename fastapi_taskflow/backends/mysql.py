@@ -80,8 +80,8 @@ _UPSERT_HISTORY = """
 INSERT INTO task_snapshots
     (task_id, func_name, status, created_at, start_time, end_time,
      duration, retries_used, error, snapshotted_at, args_json, kwargs_json,
-     logs_json, stacktrace, encrypted_payload, source, priority, executor)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+     logs_json, stacktrace, encrypted_payload, source, priority, executor, queue)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON DUPLICATE KEY UPDATE
     func_name         = VALUES(func_name),
     status            = VALUES(status),
@@ -99,20 +99,22 @@ ON DUPLICATE KEY UPDATE
     encrypted_payload = VALUES(encrypted_payload),
     source            = VALUES(source),
     priority          = VALUES(priority),
-    executor          = VALUES(executor)
+    executor          = VALUES(executor),
+    queue             = VALUES(queue)
 """
 
 _UPSERT_PENDING = """
 INSERT INTO task_pending_requeue
-    (task_id, func_name, created_at, retries_used, args_json, kwargs_json, encrypted_payload)
-VALUES (%s, %s, %s, %s, %s, %s, %s)
+    (task_id, func_name, created_at, retries_used, args_json, kwargs_json, encrypted_payload, queue)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
 ON DUPLICATE KEY UPDATE
     func_name         = VALUES(func_name),
     created_at        = VALUES(created_at),
     retries_used      = VALUES(retries_used),
     args_json         = VALUES(args_json),
     kwargs_json       = VALUES(kwargs_json),
-    encrypted_payload = VALUES(encrypted_payload)
+    encrypted_payload = VALUES(encrypted_payload),
+    queue             = VALUES(queue)
 """
 
 
@@ -201,6 +203,8 @@ class MySQLBackend(SnapshotBackend):
         """Create tables and apply any pending column migrations."""
         _migrations = [
             "ALTER TABLE task_snapshots ADD COLUMN executor VARCHAR(32)",
+            "ALTER TABLE task_snapshots ADD COLUMN queue VARCHAR(128) DEFAULT 'default'",
+            "ALTER TABLE task_pending_requeue ADD COLUMN queue VARCHAR(128) DEFAULT 'default'",
         ]
         conn = self._connect()
         try:
@@ -240,6 +244,7 @@ class MySQLBackend(SnapshotBackend):
                 t.source,
                 t.priority,
                 t.executor,
+                t.queue,
             )
             for t in records
         ]
@@ -262,6 +267,7 @@ class MySQLBackend(SnapshotBackend):
                 json.dumps(list(t.args), default=repr),
                 json.dumps(t.kwargs, default=repr),
                 t.encrypted_payload.decode() if t.encrypted_payload else None,
+                t.queue,
             )
             for t in records
         ]
@@ -361,6 +367,24 @@ class MySQLBackend(SnapshotBackend):
         finally:
             conn.close()
 
+    def _delete_records_sync(self, task_ids: list[str]) -> int:
+        """Delete specific records from history by task ID. Returns count deleted."""
+        if not task_ids:
+            return 0
+        placeholders = ",".join(["%s"] * len(task_ids))
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"DELETE FROM task_snapshots WHERE task_id IN ({placeholders})",
+                    task_ids,
+                )
+                deleted = cur.rowcount
+            conn.commit()
+            return deleted
+        finally:
+            conn.close()
+
     def _completed_ids_sync(self, task_ids: list[str]) -> set[str]:
         placeholders = ",".join(["%s"] * len(task_ids))
         conn = self._connect()
@@ -429,6 +453,9 @@ class MySQLBackend(SnapshotBackend):
     async def delete_before(self, cutoff: datetime) -> int:
         return await asyncio.to_thread(self._delete_before_sync, cutoff.isoformat())
 
+    async def delete_records(self, task_ids: list[str]) -> int:
+        return await asyncio.to_thread(self._delete_records_sync, task_ids)
+
     async def completed_ids(self, task_ids: list[str]) -> set[str]:
         if not task_ids:
             return set()
@@ -471,6 +498,7 @@ def _row_to_record(d: dict) -> TaskRecord:
         source=d.get("source") or "manual",
         priority=d.get("priority"),
         executor=d.get("executor"),
+        queue=d.get("queue") or "default",
     )
 
 
@@ -489,4 +517,5 @@ def _row_to_pending_record(d: dict) -> TaskRecord:
         args=tuple(json.loads(d["args_json"])) if d.get("args_json") else (),
         kwargs=json.loads(d["kwargs_json"]) if d.get("kwargs_json") else {},
         encrypted_payload=enc.encode() if enc else None,
+        queue=d.get("queue") or "default",
     )

@@ -120,6 +120,7 @@ class RedisBackend(SnapshotBackend):
             "source": record.source,
             "priority": str(record.priority) if record.priority is not None else "",
             "executor": record.executor or "",
+            "queue": record.queue,
         }
 
     @staticmethod
@@ -162,6 +163,7 @@ class RedisBackend(SnapshotBackend):
                 "Literal['async', 'thread', 'process'] | None",
                 mapping.get("executor") or None,
             ),
+            queue=mapping.get("queue") or "default",
         )
 
     # ------------------------------------------------------------------
@@ -239,6 +241,7 @@ class RedisBackend(SnapshotBackend):
                 "encrypted_payload": record.encrypted_payload.decode()
                 if record.encrypted_payload
                 else "",
+                "queue": record.queue,
             }
             pipe.hset(key, mapping=mapping)
             pipe.sadd(self._pending_index_key(), record.task_id)
@@ -289,6 +292,7 @@ class RedisBackend(SnapshotBackend):
                     encrypted_payload=(
                         enc.encode() if (enc := d.get("encrypted_payload")) else None
                     ),
+                    queue=d.get("queue") or "default",
                 )
             )
         return records
@@ -324,6 +328,9 @@ class RedisBackend(SnapshotBackend):
 
     def _idem_key(self, key: str) -> str:
         return f"{self._prefix}:idem:{key}"
+
+    def _meta_key(self, key: str) -> str:
+        return f"{self._prefix}:_meta:{key}"
 
     async def check_idempotency_key(self, key: str) -> "str | None":
         client = self._get_client()
@@ -381,6 +388,18 @@ class RedisBackend(SnapshotBackend):
         await pipe.execute()
         return len(to_delete)
 
+    async def delete_records(self, task_ids: list[str]) -> int:
+        """Delete specific task records from the history store by task ID."""
+        if not task_ids:
+            return 0
+        client = self._get_client()
+        pipe = client.pipeline()
+        for tid in task_ids:
+            pipe.delete(self._key(tid))
+            pipe.srem(self._index_key(), tid)
+        await pipe.execute()
+        return len(task_ids)
+
     async def completed_ids(self, task_ids: list[str]) -> set[str]:
         if not task_ids:
             return set()
@@ -409,6 +428,17 @@ class RedisBackend(SnapshotBackend):
         client = self._get_client()
         result = await client.set(self._schedule_lock_key(key), "1", nx=True, ex=ttl)
         return result is not None
+
+    async def save_metadata(self, key: str, value: str) -> None:
+        client = self._get_client()
+        await client.set(self._meta_key(key), value)
+
+    async def load_metadata(self, key: str) -> "str | None":
+        client = self._get_client()
+        value = await client.get(self._meta_key(key))
+        if value is None:
+            return None
+        return value.decode() if isinstance(value, bytes) else value
 
     async def close(self) -> None:
         if self._client is not None:

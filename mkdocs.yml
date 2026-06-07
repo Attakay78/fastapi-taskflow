@@ -78,6 +78,7 @@ nav:
     - Argument Encryption: guide/encryption.md
     - Concurrency Controls: guide/concurrency.md
     - Process Executor: guide/process-tasks.md
+    - Named Queues: guide/named-queues.md
     - Priority Queues: guide/priority-queues.md
     - Eager Dispatch: guide/eager-dispatch.md
     - Scheduled Tasks: guide/scheduled-tasks.md

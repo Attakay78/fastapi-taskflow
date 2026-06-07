@@ -79,7 +79,7 @@ The route signature does not change. Tasks that fail are retried. If the server 
 ## Features
 
 - Automatic retries with configurable delay and exponential backoff
-- Task IDs and full lifecycle tracking: `PENDING`, `RUNNING`, `SUCCESS`, `FAILED`, `INTERRUPTED`
+- Task IDs and full lifecycle tracking: `PENDING`, `RUNNING`, `SUCCESS`, `FAILED`, `INTERRUPTED`, `REJECTED`
 - Live admin dashboard over SSE at `/tasks/dashboard`
 - SQLite persistence out of the box; Redis, PostgreSQL, and MySQL as optional extras
 - Pending task requeue: unfinished tasks at shutdown are re-dispatched on startup
@@ -94,6 +94,7 @@ The route signature does not change. Tasks that fail are retried. If the server 
 - Trace context propagation: OpenTelemetry spans flow from the request into background execution (Python 3.11+)
 - Process executor: `executor='process'` routes CPU-bound tasks through a `ProcessPoolExecutor`, bypassing the GIL with true parallel workers
 - Concurrency controls: opt-in semaphore for async tasks, dedicated thread pool for sync tasks, and configurable process worker count
+- Named queues: `QueueConfig(concurrency, max_size)` for independent concurrency caps and backpressure per queue, with `QueueFullError` when a queue is full
 - Priority queues: `priority=` on `@task_manager.task()` or `add_task()`, higher-priority tasks run first, equal-priority tasks are FIFO
 - Eager dispatch: `eager=True` starts a task immediately via `asyncio.create_task` before the HTTP response is sent
 - Scheduled tasks: `@task_manager.schedule(every=)` and `cron=` with distributed lock for multi-instance
@@ -166,6 +167,8 @@ def route(tasks=Depends(task_manager.get_tasks)):
 | `requeue_on_interrupt` | `bool` | `False` | Requeue this task if it was mid-execution at shutdown. Only set for idempotent tasks. |
 | `eager` | `bool` | `False` | Start the task via `asyncio.create_task` immediately when `add_task()` is called, before the response is sent. Per-call `eager` on `add_task()` overrides this. |
 | `priority` | `int \| None` | `None` | Route through the priority queue. Higher integers run first. Conventional range 1 (lowest) to 10 (highest). Per-call `priority` on `add_task()` overrides this. |
+| `queue` | `str \| None` | `None` | Route this task to a named queue. Per-call `queue` on `add_task()` overrides this. |
+| `executor` | `str \| None` | `None` | Force a specific executor: `"async"`, `"thread"`, or `"process"`. When `None`, the executor is inferred from the function signature. |
 
 ## Idempotency keys
 
@@ -331,6 +334,51 @@ task_id = tasks.add_task(process_item, item_id)               # use decorator de
 ```
 
 Tasks with no priority route through Starlette's normal background task list unchanged.
+
+## Named queues
+
+Define named queues with independent concurrency caps and backpressure limits using `QueueConfig`. Tasks route to a queue via `queue=` on the decorator or per call on `add_task()`.
+
+```python
+from fastapi_taskflow import TaskManager
+from fastapi_taskflow.models import QueueConfig
+
+task_manager = TaskManager(
+    queues={
+        "email":   QueueConfig(concurrency=30, max_size=500),
+        "reports": QueueConfig(concurrency=4,  max_size=50),
+        "default": QueueConfig(concurrency=20),
+    },
+)
+
+
+@task_manager.task(retries=3, queue="email")
+async def send_email(address: str) -> None:
+    ...
+
+
+@task_manager.task(queue="reports")
+def generate_report(user_id: int) -> None:
+    ...
+```
+
+When a queue is at its `max_size` limit, `add_task()` raises `QueueFullError` so callers can return a 429 rather than silently growing memory. Unknown queue names fall back to `default` with a warning log.
+
+```python
+from fastapi_taskflow import QueueFullError
+
+try:
+    task_id = tasks.add_task(generate_report, user_id)
+except QueueFullError:
+    raise HTTPException(status_code=429, detail="Report queue is full")
+```
+
+`queue_stats()` returns per-queue pending, running, and finished counts. `update_queue_config()` changes concurrency and max_size at runtime without a restart.
+
+```python
+task_manager.queue_stats()
+task_manager.update_queue_config("email", concurrency=50, max_size=1000)
+```
 
 ## Eager dispatch
 

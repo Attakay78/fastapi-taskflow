@@ -7,11 +7,12 @@ DASHBOARD_JS = r"""
 
   // ── State ──────────────────────────────────────────────────────
   const PAGE_SIZE = 30;
-  let state = { tasks: [], metrics: {}, schedules: [] };
+  let state = { tasks: [], metrics: {}, schedules: [], queues: [] };
   let sortCol      = localStorage.getItem('tf-sort-col') || 'created_at';
   let sortDir      = localStorage.getItem('tf-sort-dir') || 'desc';
   let statusFilter = localStorage.getItem('tf-status')  || 'all';
   let funcFilter   = localStorage.getItem('tf-func')    || 'all';
+  let queueFilter  = localStorage.getItem('tf-queue')   || 'all';
   let searchQuery  = localStorage.getItem('tf-search')  || '';
   let timeFilterVal  = localStorage.getItem('tf-time-val')  || '';
   let timeFilterUnit = localStorage.getItem('tf-time-unit') || 'hour';
@@ -49,6 +50,7 @@ DASHBOARD_JS = r"""
     state = newState;
     renderMetrics();
     populateFuncFilter();
+    populateQueueFilter();
     renderTable();
     if (selectedId) {
       const t = state.tasks.find(function(t) { return t.task_id === selectedId; });
@@ -56,17 +58,130 @@ DASHBOARD_JS = r"""
     }
     renderSchedules();
     renderDeadLetters();
+    var qcnt = document.getElementById('tab-queues-count');
+    if (qcnt) qcnt.textContent = (state.queues && state.queues.length > 0) ? state.queues.length : '';
+    if (document.getElementById('panel-queues') &&
+        document.getElementById('panel-queues').style.display !== 'none') {
+      renderQueues(state.queues || []);
+    }
     var vcnt = document.getElementById('tab-view-count');
     if (vcnt) vcnt.textContent = state.tasks.length > 0 ? state.tasks.length : '';
   }
 
   function showTab(name) {
-    ['view', 'deadletters', 'audit', 'schedules', 'tasks'].forEach(function(t) {
+    ['view', 'deadletters', 'audit', 'schedules', 'queues', 'tasks'].forEach(function(t) {
       document.getElementById('panel-' + t).style.display = name === t ? '' : 'none';
       var tabEl = document.getElementById('tab-' + t);
       if (tabEl) tabEl.classList.toggle('tab-btn--active', name === t);
     });
     if (name === 'audit') fetchAudit();
+    if (name === 'queues') renderQueues(state.queues || []);
+  }
+
+  function fetchQueues() {
+    fetch(TASKS_PREFIX + '/dashboard/queues')
+      .then(function(r) { return r.text(); })
+      .then(function(html) {
+        var el = document.getElementById('queues-content');
+        if (el) el.innerHTML = html;
+      })
+      .catch(function() {});
+  }
+
+  function renderQueues(queues) {
+    var el = document.getElementById('queues-content');
+    if (!el) return;
+    if (!queues || !queues.length) {
+      el.innerHTML = '<div class="q-empty">No named queues configured. Pass <code>queues=</code> or <code>max_size=</code> to <code>TaskManager</code> to activate the named queue system.</div>';
+      return;
+    }
+    var cards = queues.map(function(q) {
+      var name = esc(q.name);
+      var concurrency = q.concurrency != null ? q.concurrency : '';
+      var maxSize = q.max_size != null ? q.max_size : '';
+      var pending  = q.pending  || 0;
+      var running  = q.running  || 0;
+      var finished = q.finished || 0;
+      var rejected = q.rejected || 0;
+      var patchUrl = TASKS_PREFIX + '/queues/' + esc(q.name);
+      var isFull = q.max_size != null && pending >= q.max_size;
+      var dangerBadge = isFull ? '<span class="q-badge-full">FULL</span>' : '';
+      return '<div class="q-card' + (isFull ? ' q-card--full' : '') + '">'
+        + '<div class="q-card-header">'
+        + '<span class="q-card-name">' + name + '</span>'
+        + dangerBadge
+        + '<span class="q-badge-type">queue</span>'
+        + '</div>'
+        + '<div class="q-stats">'
+        + qStat('Pending',  pending,  '#9ca3af')
+        + qStat('Running',  running,  '#2563eb')
+        + qStat('Finished', finished, '#16a34a')
+        + qStat('Rejected', rejected, rejected > 0 ? '#dc2626' : '#9ca3af')
+        + '</div>'
+        + '<form class="q-form" onsubmit="updateQueue(event, \'' + patchUrl + '\')">'
+        + '<div class="q-field">'
+        + '<label class="q-field-label">Concurrency</label>'
+        + '<input type="number" name="concurrency" min="1" value="' + concurrency + '" placeholder="unlimited" disabled class="q-input">'
+        + '</div>'
+        + '<div class="q-field">'
+        + '<label class="q-field-label">Max size</label>'
+        + '<input type="number" name="max_size" min="1" value="' + maxSize + '" placeholder="unlimited" disabled class="q-input">'
+        + '</div>'
+        + '<button type="button" class="q-btn-edit" onclick="queueEditToggle(this)">Edit</button>'
+        + '<button type="submit" class="q-btn-save">Save</button>'
+        + '<button type="button" class="q-btn-cancel" onclick="queueResetForm(this.closest(\'form\'))">Cancel</button>'
+        + '</form>'
+        + '</div>';
+    });
+    el.innerHTML = '<div class="q-grid">' + cards.join('') + '</div>';
+  }
+
+  function queueEditToggle(editBtn) {
+    var form = editBtn.closest('form');
+    form.querySelectorAll('input[type="number"]').forEach(function(inp) { inp.disabled = false; });
+    editBtn.style.display = 'none';
+    form.querySelector('.q-btn-save').style.display = 'inline-block';
+    form.querySelector('.q-btn-cancel').style.display = 'inline-block';
+    form.querySelector('input[type="number"]') && form.querySelector('input[type="number"]').focus();
+  }
+
+  function queueResetForm(form) {
+    form.querySelectorAll('input[type="number"]').forEach(function(inp) { inp.disabled = true; });
+    var editBtn = form.querySelector('.q-btn-edit');
+    var saveBtn = form.querySelector('.q-btn-save');
+    var cancelBtn = form.querySelector('.q-btn-cancel');
+    if (editBtn) editBtn.style.display = 'inline-block';
+    if (saveBtn) saveBtn.style.display = 'none';
+    if (cancelBtn) cancelBtn.style.display = 'none';
+  }
+
+  function qStat(label, value, color) {
+    return '<div class="q-stat">'
+      + '<div class="q-stat-label">' + label + '</div>'
+      + '<div class="q-stat-value" style="color:' + color + '">' + value + '</div>'
+      + '</div>';
+  }
+
+  function updateQueue(event, url) {
+    event.preventDefault();
+    var form = event.target;
+    var concurrencyVal = form.concurrency.value.trim();
+    var maxSizeVal = form.max_size.value.trim();
+    var body = {
+      concurrency: concurrencyVal === '' ? null : parseInt(concurrencyVal, 10),
+      max_size: maxSizeVal === '' ? null : parseInt(maxSizeVal, 10)
+    };
+    fetch(url, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    .then(function(r) {
+      if (!r.ok) return r.json().then(function(d) { throw new Error(d.detail || 'Error'); });
+      showToast('Queue updated');
+      queueResetForm(form);
+    })
+    .catch(function(e) { showToast(e.message || 'Failed to update queue'); });
   }
 
   function renderSchedules() {
@@ -171,6 +286,7 @@ DASHBOARD_JS = r"""
       .filter(function(t) {
         if (statusFilter !== 'all' && t.status !== statusFilter) return false;
         if (funcFilter   !== 'all' && t.func_name !== funcFilter) return false;
+        if (queueFilter  !== 'all' && (t.queue || 'default') !== queueFilter) return false;
         if (cutoff !== null) {
           var ts = t.created_at ? new Date(t.created_at).getTime() : 0;
           if (ts < cutoff) return false;
@@ -190,7 +306,7 @@ DASHBOARD_JS = r"""
   }
 
   // ── Bulk selection helpers ─────────────────────────────────────
-  function isRetryable(t) { return t.status === 'failed' || t.status === 'interrupted'; }
+  function isRetryable(t) { return t.status === 'failed' || t.status === 'interrupted' || t.status === 'rejected'; }
 
   function updateBulkBar() {
     var bar = document.getElementById('bulk-bar');
@@ -332,7 +448,7 @@ DASHBOARD_JS = r"""
 
     var tbody = document.getElementById('tasks-tbody');
     if (!tasks.length) {
-      tbody.innerHTML = '<tr><td colspan="8" class="empty">No tasks match the current filters.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" class="empty">No tasks match the current filters.</td></tr>';
       renderPagination(total);
       updateBulkBar();
       return;
@@ -358,6 +474,7 @@ DASHBOARD_JS = r"""
         + '<button class="copy-btn copy-btn--row" data-val="' + esc(t.task_id) + '" onclick="event.stopPropagation();copyId(this)" title="Copy full ID"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>'
         + '</td>'
         + '<td class="td td--func">' + esc(t.func_name) + (t.source === 'scheduled' ? ' <span class="source-badge">scheduled</span>' : '') + '</td>'
+        + '<td class="td td--mono" style="font-size:0.78rem">' + esc(t.queue || 'default') + '</td>'
         + '<td class="td">'           + badge(t.status) + '</td>'
         + '<td class="td">'     + dur + '</td>'
         + '<td class="td">'     + t.retries_used + '</td>'
@@ -392,7 +509,7 @@ DASHBOARD_JS = r"""
   function goPage(p) { currentPage = p; renderTable(); }
 
   function badge(status) {
-    var cls = { pending:'badge--pending', running:'badge--running', success:'badge--success', failed:'badge--failed', interrupted:'badge--interrupted', cancelled:'badge--cancelled' };
+    var cls = { pending:'badge--pending', running:'badge--running', success:'badge--success', failed:'badge--failed', interrupted:'badge--interrupted', cancelled:'badge--cancelled', rejected:'badge--rejected' };
     return '<span class="badge ' + (cls[status] || 'badge--pending') + '">' + esc(status) + '</span>';
   }
 
@@ -443,6 +560,15 @@ DASHBOARD_JS = r"""
     const fns  = [...new Set(state.tasks.map(t => t.func_name))].sort();
     sel.innerHTML = '<option value="all">All functions</option>'
       + fns.map(f => '<option value="' + esc(f) + '"' + (f === prev ? ' selected' : '') + '>' + esc(f) + '</option>').join('');
+  }
+
+  // ── Queue filter ───────────────────────────────────────────────
+  function populateQueueFilter() {
+    const sel  = document.getElementById('queue-filter');
+    const prev = sel.value;
+    const names = [...new Set(state.tasks.map(t => t.queue || 'default'))].sort();
+    sel.innerHTML = '<option value="all">All queues</option>'
+      + names.map(q => '<option value="' + esc(q) + '"' + (q === prev ? ' selected' : '') + '>' + esc(q) + '</option>').join('');
   }
 
   // ── Detail Panel ───────────────────────────────────────────────
@@ -538,14 +664,17 @@ DASHBOARD_JS = r"""
           + '</div>'
         : '')
 
-      + ((task.status === 'failed' || task.status === 'interrupted') ?
+      + ((task.status === 'failed' || task.status === 'interrupted' || task.status === 'rejected') ?
           '<div class="d-section" style="margin-top:4px">'
           + '<button class="retry-btn retry-btn--warn" id="retry-btn-' + esc(task.task_id) + '" data-task-id="' + esc(task.task_id) + '" onclick="retryTask(this.dataset.taskId, this)">'
           + '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.5"/></svg>'
-          + 'Retry this task'
+          + (task.status === 'rejected' ? 'Re-run this task' : 'Retry this task')
           + '</button>'
           + (task.status === 'interrupted' ?
               '<div style="font-size:11px;color:var(--db-text-muted);margin-top:5px">This task was mid-execution when the app shut down. Retry only if you are sure the function did not already complete its side effects.</div>'
+            : '')
+          + (task.status === 'rejected' ?
+              '<div style="font-size:11px;color:var(--db-text-muted);margin-top:5px">This task was rejected due to queue backpressure. Re-run it when the queue has capacity.</div>'
             : '')
           + '</div>'
         : '')
@@ -781,6 +910,10 @@ DASHBOARD_JS = r"""
     funcFilter = e.target.value; currentPage = 0;
     localStorage.setItem('tf-func', funcFilter); renderTable();
   });
+  document.getElementById('queue-filter').addEventListener('change', function(e) {
+    queueFilter = e.target.value; currentPage = 0;
+    localStorage.setItem('tf-queue', queueFilter); renderTable();
+  });
   document.getElementById('detail-close').addEventListener('click', closeDetail);
   document.getElementById('detail-backdrop').addEventListener('click', closeDetail);
 
@@ -790,6 +923,8 @@ DASHBOARD_JS = r"""
     if (si) si.value = searchQuery;
     var sf = document.getElementById('status-filter');
     if (sf) sf.value = statusFilter;
+    var qf = document.getElementById('queue-filter');
+    if (qf) qf.value = queueFilter;
     // Restore time filter button label
     if (timeFilterVal && parseInt(timeFilterVal, 10) > 0) {
       var unitLabels = { min: 'min', hour: 'hr', day: 'd' };

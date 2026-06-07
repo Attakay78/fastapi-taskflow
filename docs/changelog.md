@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.9.0
+
+Adds named queues with independent concurrency caps, backpressure limits, and live config updates.
+
+### Named queues
+
+- Added `QueueConfig(concurrency, max_size)` for defining named queues with independent concurrency and backpressure settings.
+- `queues` parameter on `TaskManager` accepts a dict of `QueueConfig` instances keyed by queue name. A `default` queue is created automatically when omitted.
+- `queue` parameter on `@task_manager.task()` and `add_task()` routes tasks to a named queue. Per-call `queue` on `add_task()` overrides the decorator default.
+- When a queue is at its `max_size` limit, `add_task()` raises `QueueFullError` so callers can return a 429 instead of growing memory without bound.
+- `max_size` on `TaskManager` is a shorthand for setting `max_size` on the default queue without defining a full `queues` dict.
+- Priority ordering within a named queue is preserved: higher-priority tasks are drained first within the same queue.
+- Unknown queue names fall back to `default` with a warning log rather than raising.
+- Added `REJECTED` status. Tasks blocked from entering a queue due to concurrency policy can be marked rejected instead of queued.
+- Added `TaskManager.queue_stats()` returning pending, running, finished counts and config for each queue.
+- Added `TaskManager.update_queue_config(name, concurrency, max_size)` for live config changes without a restart.
+
+### Dashboard improvements
+
+- Queues tab added showing per-queue stats with inline concurrency and max_size editing.
+- Queue column added to the task table.
+- Queue filter dropdown added for filtering tasks by queue name.
+- `REJECTED` status badge added to the metrics row and Dead Letters tab.
+- Dark mode toggle added to the dashboard toolbar.
+
+---
+
 ## v0.8.1
 
 ### Bug fixes

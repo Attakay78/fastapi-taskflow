@@ -1,8 +1,14 @@
 """Task execution engine.
 
 :func:`execute_task` is the single function responsible for running a task
-function through its full lifecycle: status transitions, retry loop,
-log capture, and optional persistence on completion.
+function through its full lifecycle. Internally it builds an
+:class:`~fastapi_taskflow.middleware.ExecContext` and runs it through the
+default middleware pipeline:
+
+1. :class:`~fastapi_taskflow.middleware.IdempotencyMiddleware`
+2. :class:`~fastapi_taskflow.middleware.LoggingMiddleware`
+3. :class:`~fastapi_taskflow.middleware.RetryMiddleware`
+4. :func:`_dispatch_endpoint` (executor dispatch)
 
 :func:`make_background_func` wraps ``execute_task`` into a zero-argument
 async callable that FastAPI's ``BackgroundTasks`` can call after the response
@@ -17,15 +23,19 @@ to this module as the ``executor_obj`` parameter.
 
 import asyncio
 import contextvars
-import logging
 import pickle
 import sys
-import traceback
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from .executors.base import TaskExecutionContext
-from .models import TaskConfig, TaskStatus
+from .middleware import (
+    ExecContext,
+    IdempotencyMiddleware,
+    LoggingMiddleware,
+    RetryMiddleware,
+    build_pipeline,
+)
+from .models import TaskConfig
 from .store import TaskStore
 from .task_logging import (
     TaskContext,
@@ -37,8 +47,6 @@ if TYPE_CHECKING:
     from .backends.base import SnapshotBackend
     from .executors.base import Executor
     from .loggers.base import TaskObserver
-
-from .loggers.base import LifecycleEvent, LogEvent
 
 
 def _build_exec_ctx(
@@ -82,40 +90,79 @@ def _build_exec_ctx(
     return result[0]
 
 
-def _schedule_log(
-    coro: "Any",
-    loop: asyncio.AbstractEventLoop,
-    pending: list,
-) -> None:
-    """Schedule *coro* and append the resulting future to *pending* for later draining.
+async def _dispatch_endpoint(ctx: ExecContext) -> None:
+    """Innermost pipeline step: dispatch the task function via the executor.
 
-    When called from the event loop thread, ``create_task`` is used and an
-    ``asyncio.Task`` is appended. When called from a thread-pool thread (sync tasks
-    run via ``asyncio.to_thread``), ``run_coroutine_threadsafe`` is used and a
-    ``concurrent.futures.Future`` is appended. In both cases the caller drains
-    *pending* with :func:`_drain_pending` after the task function returns.
+    Builds the per-attempt execution context, routes through ``ctx.executor_obj``
+    (or the legacy implicit dispatch path when it is ``None``), and registers
+    the running task handle in ``ctx.running_tasks`` for cancellation support.
     """
-    try:
-        asyncio.get_running_loop()
-        pending.append(asyncio.ensure_future(coro))
-    except RuntimeError:
-        pending.append(asyncio.run_coroutine_threadsafe(coro, loop))
+    ctx_obj = TaskContext(
+        task_id=ctx.task_id,
+        func_name=ctx.func_name,
+        attempt=ctx.attempt,
+        tags=ctx.tags,
+    )
+    sink = ctx.sink or (lambda *_a, **_kw: None)
+    exec_ctx = _build_exec_ctx(ctx.captured_ctx, sink, ctx_obj)
+    task_exec_ctx = TaskExecutionContext(
+        task_id=ctx.task_id,
+        func_name=ctx.func_name,
+        attempt=ctx.attempt,
+        tags=ctx.tags,
+    )
+
+    if ctx.executor_obj is not None:
+        dispatch_coro = ctx.executor_obj.dispatch(
+            ctx.func,
+            ctx.actual_args,
+            ctx.actual_kwargs,
+            task_exec_ctx,
+            exec_ctx,
+            sink,
+            ctx.loop,
+        )
+        ctx._inner_task = asyncio.ensure_future(dispatch_coro)
+    else:
+        # Legacy implicit dispatch: auto-detect from function signature.
+        # Preserved for backward compatibility with direct execute_task callers.
+        import inspect as _inspect
+
+        if _inspect.iscoroutinefunction(ctx.func):
+            if sys.version_info >= (3, 11):
+                ctx._inner_task = asyncio.create_task(
+                    ctx.func(*ctx.actual_args, **ctx.actual_kwargs), context=exec_ctx
+                )
+            else:
+
+                async def _run_in_ctx() -> None:
+                    t1 = _log_sink.set(ctx.sink)
+                    t2 = _task_context.set(ctx_obj)
+                    try:
+                        await ctx.func(*ctx.actual_args, **ctx.actual_kwargs)
+                    finally:
+                        _log_sink.reset(t1)
+                        _task_context.reset(t2)
+
+                ctx._inner_task = asyncio.create_task(_run_in_ctx())
+        else:
+            ctx._inner_task = asyncio.ensure_future(
+                asyncio.to_thread(
+                    exec_ctx.run, ctx.func, *ctx.actual_args, **ctx.actual_kwargs
+                )
+            )
+
+    if ctx.running_tasks is not None:
+        ctx.running_tasks[ctx.task_id] = ctx._inner_task
+    await ctx._inner_task
+    ctx._inner_task = None
 
 
-async def _drain_pending(pending: list) -> None:
-    """Await all futures collected by :func:`_schedule_log`, then clear the list.
-
-    ``asyncio.Task`` objects are awaited directly. ``concurrent.futures.Future``
-    objects (from thread-pool log events) are wrapped via ``asyncio.wrap_future``
-    before awaiting.
-    """
-    if not pending:
-        return
-    awaitables = [
-        f if isinstance(f, asyncio.Task) else asyncio.wrap_future(f) for f in pending
-    ]
-    pending.clear()
-    await asyncio.gather(*awaitables, return_exceptions=True)
+_DEFAULT_MIDDLEWARE = [
+    IdempotencyMiddleware(),
+    LoggingMiddleware(),
+    RetryMiddleware(),
+]
 
 
 async def execute_task(
@@ -135,9 +182,9 @@ async def execute_task(
 ) -> None:
     """Run *func* through the full task lifecycle: PENDING -> RUNNING -> SUCCESS | FAILED.
 
-    Handles the retry loop, records every status transition in *store*, and
-    captures :func:`~fastapi_taskflow.task_logging.task_log` entries per attempt.
-    The full traceback of the final failure is stored on the task record.
+    Builds an :class:`~fastapi_taskflow.middleware.ExecContext` and runs it
+    through the default middleware pipeline (idempotency, logging, retry) before
+    the executor dispatch endpoint.
 
     Dispatch is routed through *executor_obj*, which encapsulates whether the
     function runs as a coroutine, in a thread pool, or in a process pool.
@@ -177,39 +224,6 @@ async def execute_task(
             enters ``RUNNING`` and removed on completion or cancellation. Used
             by ``POST /tasks/{task_id}/cancel`` to cancel running async tasks.
     """
-    await _execute_task_inner(
-        func=func,
-        task_id=task_id,
-        config=config,
-        store=store,
-        args=args,
-        kwargs=kwargs,
-        executor_obj=executor_obj,
-        backend=backend,
-        on_success=on_success,
-        logger=logger,
-        encryptor=encryptor,
-        captured_ctx=captured_ctx,
-        running_tasks=running_tasks,
-    )
-
-
-async def _execute_task_inner(
-    func: Callable,
-    task_id: str,
-    config: TaskConfig,
-    store: TaskStore,
-    args: tuple,
-    kwargs: dict,
-    executor_obj: "Optional[Executor]" = None,
-    backend: "Optional[SnapshotBackend]" = None,
-    on_success: "Optional[Callable]" = None,
-    logger: "Optional[TaskObserver]" = None,
-    encryptor: Any = None,
-    captured_ctx: Optional[contextvars.Context] = None,
-    running_tasks: Optional[dict] = None,
-) -> None:
-    """Inner execution body, called by :func:`execute_task`. Not for direct use."""
     record = store.get(task_id)
     func_name = func.__name__
     tags: dict[str, str] = record.tags if record is not None else {}
@@ -227,293 +241,30 @@ async def _execute_task_inner(
     else:
         actual_args, actual_kwargs = args, kwargs
 
-    # Capture the running event loop now. The sink closure may be called from
-    # a thread-pool thread (sync tasks via asyncio.to_thread), so we hold the
-    # loop reference to schedule coroutines safely via run_coroutine_threadsafe.
     loop = asyncio.get_running_loop()
 
-    # Cross-instance idempotency check.
-    if record is not None and record.idempotency_key and backend is not None:
-        try:
-            existing_id = await backend.check_idempotency_key(record.idempotency_key)
-        except Exception:
-            logging.getLogger(__name__).exception(
-                "fastapi-taskflow: idempotency key check failed for task %s, "
-                "proceeding without deduplication.",
-                task_id,
-            )
-            existing_id = None
-        if existing_id is not None and existing_id != task_id:
-            store.update(
-                task_id,
-                status=TaskStatus.SUCCESS,
-                start_time=datetime.now(timezone.utc),
-                end_time=datetime.now(timezone.utc),
-            )
-            return
+    ctx = ExecContext(
+        func=func,
+        func_name=func_name,
+        task_id=task_id,
+        config=config,
+        store=store,
+        actual_args=actual_args,
+        actual_kwargs=actual_kwargs,
+        record=record,
+        tags=tags,
+        executor_obj=executor_obj,
+        backend=backend,
+        on_success=on_success,
+        logger=logger,
+        captured_ctx=captured_ctx,
+        running_tasks=running_tasks,
+        loop=loop,
+    )
 
-    task_start = datetime.now(timezone.utc)
-    store.update(task_id, status=TaskStatus.RUNNING, start_time=task_start)
-
-    if logger is not None:
-        await logger.on_lifecycle(
-            LifecycleEvent(
-                task_id=task_id,
-                func_name=func_name,
-                status=TaskStatus.RUNNING,
-                timestamp=task_start,
-                attempt=0,
-                retries_used=0,
-                tags=tags,
-            )
-        )
-
-    # _state tracks the current attempt index so the sink closure always
-    # attaches the right number to LogEvent objects. A dict avoids Python
-    # cell-variable rebinding issues.
-    _state: dict[str, int] = {"attempt": 0}
-
-    # Pending log futures: collected by the sink, drained after each attempt
-    # so all on_log() calls complete before the lifecycle event fires.
-    _pending_log: list = []
-
-    def sink(msg: str, level: str, extra: dict) -> None:
-        ts = datetime.now(timezone.utc)
-        store.append_log(task_id, f"{ts.strftime('%Y-%m-%dT%H:%M:%S')} {msg}")
-        if logger is not None:
-            event = LogEvent(
-                task_id=task_id,
-                func_name=func_name,
-                message=msg,
-                level=level,
-                timestamp=ts,
-                attempt=_state["attempt"],
-                tags=tags,
-                extra=extra,
-            )
-            _schedule_log(logger.on_log(event), loop, _pending_log)
-
-    delay = config.delay
-    last_error: Exception | None = None
-    last_tb: str | None = None
-    # exec_start default covers the case where CancelledError fires before the
-    # first attempt sets it (e.g. during a retry sleep).
-    exec_start = task_start
-    # Reference to the asyncio Task/Future running the current dispatch.
-    # Stored so the cancel endpoint can call .cancel() on it directly.
-    _inner_task: Optional[asyncio.Task] = None
-
+    pipeline = build_pipeline(ctx, _DEFAULT_MIDDLEWARE, _dispatch_endpoint)
     try:
-        for attempt in range(config.retries + 1):
-            _state["attempt"] = attempt
-
-            if attempt > 0:
-                await asyncio.sleep(delay)
-                delay *= config.backoff
-                store.update(task_id, retries_used=attempt)
-                store.append_log(task_id, f"--- Retry {attempt} ---")
-
-            ctx_obj = TaskContext(
-                task_id=task_id,
-                func_name=func_name,
-                attempt=attempt,
-                tags=tags,
-            )
-
-            # Build an execution context that merges trace context (from captured_ctx)
-            # with the task-specific log sink and TaskContext vars. Used by
-            # async and thread executors; ignored by the process executor.
-            exec_ctx = _build_exec_ctx(captured_ctx, sink, ctx_obj)
-
-            # TaskExecutionContext carries the same fields in a plain-dict-
-            # serializable form for cross-process transport by the process executor.
-            task_exec_ctx = TaskExecutionContext(
-                task_id=task_id,
-                func_name=func_name,
-                attempt=attempt,
-                tags=tags,
-            )
-
-            exec_start = datetime.now(timezone.utc)
-
-            try:
-                if executor_obj is not None:
-                    # Route through the registered executor (async, thread, or process).
-                    dispatch_coro = executor_obj.dispatch(
-                        func,
-                        actual_args,
-                        actual_kwargs,
-                        task_exec_ctx,
-                        exec_ctx,
-                        sink,
-                        loop,
-                    )
-                    _inner_task = asyncio.ensure_future(dispatch_coro)
-                else:
-                    # Legacy implicit dispatch: auto-detect from function signature.
-                    # Preserved for backward compatibility with direct execute_task callers.
-                    import inspect as _inspect
-
-                    if _inspect.iscoroutinefunction(func):
-                        if sys.version_info >= (3, 11):
-                            _inner_task = asyncio.create_task(
-                                func(*actual_args, **actual_kwargs), context=exec_ctx
-                            )
-                        else:
-
-                            async def _run_in_ctx() -> None:
-                                t1 = _log_sink.set(sink)
-                                t2 = _task_context.set(ctx_obj)
-                                try:
-                                    await func(*actual_args, **actual_kwargs)
-                                finally:
-                                    _log_sink.reset(t1)
-                                    _task_context.reset(t2)
-
-                            _inner_task = asyncio.create_task(_run_in_ctx())
-                    else:
-                        _inner_task = asyncio.ensure_future(
-                            asyncio.to_thread(
-                                exec_ctx.run, func, *actual_args, **actual_kwargs
-                            )
-                        )
-
-                if running_tasks is not None:
-                    running_tasks[task_id] = _inner_task
-                await _inner_task
-                _inner_task = None
-
-                await _drain_pending(_pending_log)
-
-                end_time = datetime.now(timezone.utc)
-                store.update(task_id, status=TaskStatus.SUCCESS, end_time=end_time)
-
-                if logger is not None:
-                    duration = (end_time - exec_start).total_seconds()
-                    await logger.on_lifecycle(
-                        LifecycleEvent(
-                            task_id=task_id,
-                            func_name=func_name,
-                            status=TaskStatus.SUCCESS,
-                            timestamp=end_time,
-                            attempt=attempt,
-                            retries_used=attempt,
-                            duration=duration,
-                            tags=tags,
-                        )
-                    )
-
-                if on_success is not None:
-                    await on_success(task_id)
-                if (
-                    record is not None
-                    and record.idempotency_key
-                    and backend is not None
-                ):
-                    try:
-                        await backend.record_idempotency_key(
-                            record.idempotency_key, task_id
-                        )
-                    except Exception:
-                        logging.getLogger(__name__).exception(
-                            "fastapi-taskflow: failed to record idempotency key for task %s, "
-                            "duplicate execution is possible if this task is retried externally.",
-                            task_id,
-                        )
-                return
-
-            except Exception as exc:  # noqa: BLE001
-                _inner_task = None
-                # Worker was killed by SIGINT (Ctrl+C). Leave the record as
-                # RUNNING so save_interrupted_tasks() can classify it as
-                # INTERRUPTED or re-queue it as PENDING based on the task's
-                # requeue_on_interrupt flag. Do not retry, the server is
-                # shutting down.
-                if getattr(exc, "_was_interrupted", False):
-                    return
-                last_error = exc
-                # For process executor tasks, _WorkerException attaches the
-                # full worker-side traceback as _worker_traceback so the
-                # dashboard error panel shows the complete call stack.
-                last_tb = (
-                    getattr(exc, "_worker_traceback", None) or traceback.format_exc()
-                )
-
-        await _drain_pending(_pending_log)
-
-        # If save_interrupted_tasks() already finalised this record (e.g. set
-        # it to PENDING for requeue or INTERRUPTED during graceful shutdown),
-        # don't override it with FAILED.
-        _current = store.get(task_id)
-        if _current is not None and _current.status != TaskStatus.RUNNING:
-            return
-
-        end_time = datetime.now(timezone.utc)
-        store.update(
-            task_id,
-            status=TaskStatus.FAILED,
-            end_time=end_time,
-            error=str(last_error),
-            stacktrace=last_tb,
-        )
-
-        if logger is not None:
-            duration = (end_time - exec_start).total_seconds()
-            await logger.on_lifecycle(
-                LifecycleEvent(
-                    task_id=task_id,
-                    func_name=func_name,
-                    status=TaskStatus.FAILED,
-                    timestamp=end_time,
-                    attempt=config.retries,
-                    retries_used=config.retries,
-                    duration=duration,
-                    error=str(last_error),
-                    stacktrace=last_tb,
-                    tags=tags,
-                )
-            )
-
-    except asyncio.CancelledError:
-        # Cancel the inner dispatch task if it is still running (async tasks).
-        # For sync tasks running in a thread pool or process pool, the
-        # underlying work cannot be interrupted; cancellation stops the await
-        # but the thread or worker runs to completion in the background.
-        if _inner_task is not None and not _inner_task.done():
-            _inner_task.cancel()
-        await _drain_pending(_pending_log)
-        end_time = datetime.now(timezone.utc)
-        current = store.get(task_id)
-        if current is not None and current.status == TaskStatus.RUNNING:
-            if store._shutting_down and config.requeue_on_interrupt:
-                # Shutdown-driven cancellation, task opted into requeue.
-                # Mark PENDING so flush_pending() saves it to the requeue store.
-                store.update(task_id, status=TaskStatus.PENDING)
-            elif store._shutting_down:
-                # Shutdown-driven cancellation, task did not opt into requeue.
-                # Leave status as RUNNING so flush_pending() classifies it as
-                # INTERRUPTED, consistent with process executor behavior.
-                pass
-            else:
-                # User-initiated cancel via the dashboard or cancel API.
-                store.update(task_id, status=TaskStatus.CANCELLED, end_time=end_time)
-                if logger is not None:
-                    duration = (end_time - exec_start).total_seconds()
-                    await logger.on_lifecycle(
-                        LifecycleEvent(
-                            task_id=task_id,
-                            func_name=func_name,
-                            status=TaskStatus.CANCELLED,
-                            timestamp=end_time,
-                            attempt=_state["attempt"],
-                            retries_used=_state["attempt"],
-                            duration=duration,
-                            tags=tags,
-                        )
-                    )
-                if on_success is not None:
-                    await on_success(task_id)
-
+        await pipeline()
     finally:
         if running_tasks is not None:
             running_tasks.pop(task_id, None)

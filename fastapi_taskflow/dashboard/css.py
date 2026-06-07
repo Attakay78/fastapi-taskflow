@@ -58,12 +58,10 @@ DASHBOARD_CSS = r"""
     .status-label--error { color: #dc2626; }
 
     /* ── Top row (metrics + filters) ────────────────────────── */
-    .top-row { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 8px; }
-    .search-row { display: flex; gap: 16px; align-items: center; margin-bottom: 16px; }
-    .search-row .search { flex: 1; height: 34px; }
-    .search-row .filter-trigger-btn { width: 280px; flex-shrink: 0; height: 34px; font-size: 12px; justify-content: center; }
+    .top-row { display: flex; gap: 16px; align-items: stretch; margin-bottom: 8px; }
+    .metrics-col { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+    .metrics-col .search { width: 100%; flex: 1; }
     .metrics {
-      flex: 1;
       display: grid;
       grid-template-columns: repeat(9, minmax(0, 1fr));
       gap: 8px;
@@ -373,6 +371,10 @@ DASHBOARD_CSS = r"""
     .badge--cancelled { background: #fce7f3; color: #be185d; }
     [data-theme="dark"] .badge--cancelled { background: rgba(190,24,93,.2); color: #f472b6; }
 
+    /* ── Rejected badge ─────────────────────────────────────── */
+    .badge--rejected { background: #fef2f2; color: #9f1239; }
+    [data-theme="dark"] .badge--rejected { background: rgba(159,18,57,.2); color: #fb7185; }
+
     /* ── Cancelled metric card ──────────────────────────────── */
     .mc-cancelled { background: #fce7f3; border-color: #f9a8d4; }
     .mc-cancelled .metric-label { color: #9d174d; }
@@ -398,4 +400,31 @@ DASHBOARD_CSS = r"""
     .rtask-pill { font-size: 10.5px; font-weight: 500; padding: 2px 7px; border-radius: 4px; background: var(--db-surface-3); color: var(--db-text-3); border: 1px solid var(--db-border-2); white-space: nowrap; }
     .rtask-pill--accent { background: rgba(0,150,136,.08); color: #009688; border-color: rgba(0,150,136,.2); }
     [data-theme="dark"] .rtask-pill--accent { background: rgba(0,150,136,.15); color: #4db6ac; }
+
+    /* ── Queue cards ─────────────────────────────────────────── */
+    .q-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
+    .q-card { background: var(--db-surface); border: 1px solid var(--db-border); border-radius: 10px; padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+    .q-card--full { border: 2px solid #dc2626; }
+    .q-card-header { display: flex; align-items: center; gap: 8px; }
+    .q-card-name { font-weight: 600; font-size: 1rem; color: var(--db-text); flex: 1; }
+    .q-badge-type { font-size: 0.7rem; background: var(--db-surface-3); color: var(--db-text-3); padding: 2px 8px; border-radius: 4px; font-family: monospace; }
+    .q-badge-full { font-size: 0.68rem; background: #fef2f2; color: #dc2626; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+    [data-theme="dark"] .q-badge-full { background: rgba(220,38,38,.15); color: #f87171; }
+    .q-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .q-stat { background: var(--db-surface-3); border-radius: 6px; padding: 8px 10px; }
+    .q-stat-label { font-size: 0.65rem; text-transform: uppercase; letter-spacing: .04em; color: var(--db-text-muted); font-weight: 500; margin-bottom: 3px; }
+    .q-stat-value { font-size: 1.1rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .q-form { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+    .q-field { display: flex; flex-direction: column; gap: 3px; }
+    .q-field-label { font-size: 0.68rem; color: var(--db-text-muted); font-weight: 500; }
+    .q-input { width: 100px; padding: 5px 8px; border: 1px solid var(--db-border); border-radius: 5px; font-size: 0.82rem; background: var(--db-surface-2); color: var(--db-text-3); }
+    .q-input:not(:disabled) { background: var(--db-surface); color: var(--db-text); border-color: var(--db-border); }
+    .q-btn-edit { padding: 5px 14px; background: var(--db-surface); color: var(--db-text-2); border: 1px solid var(--db-border); border-radius: 5px; font-size: 0.82rem; cursor: pointer; height: 30px; margin-bottom: 1px; }
+    .q-btn-edit:hover { background: var(--db-surface-3); }
+    .q-btn-save { display: none; padding: 5px 14px; background: #111; color: #fff; border: none; border-radius: 5px; font-size: 0.82rem; cursor: pointer; height: 30px; margin-bottom: 1px; }
+    .q-btn-save:hover { opacity: .85; }
+    [data-theme="dark"] .q-btn-save { background: #e6edf3; color: #0d1117; }
+    .q-btn-cancel { display: none; padding: 5px 14px; background: var(--db-surface); color: var(--db-text-2); border: 1px solid var(--db-border); border-radius: 5px; font-size: 0.82rem; cursor: pointer; height: 30px; margin-bottom: 1px; }
+    .q-btn-cancel:hover { background: var(--db-surface-3); }
+    .q-empty { color: var(--db-text-faint); padding: 40px; text-align: center; font-size: 0.9rem; }
 """

@@ -20,6 +20,7 @@ class TaskStatus(str, Enum):
     FAILED      = "failed"
     INTERRUPTED = "interrupted"
     CANCELLED   = "cancelled"
+    REJECTED    = "rejected"
 ```
 
 | Value | Meaning |
@@ -30,6 +31,7 @@ class TaskStatus(str, Enum):
 | `FAILED` | Task raised an exception on its final attempt after all retries were exhausted. Terminal. |
 | `INTERRUPTED` | Task was mid-execution when the app shut down and `requeue_on_interrupt` was not enabled. Saved to history, visible in the dashboard, and not re-executed automatically. Can be retried via `POST /tasks/{task_id}/retry`. Terminal. |
 | `CANCELLED` | Task was cancelled before execution via `POST /tasks/{task_id}/cancel`. Terminal; the task will not run. |
+| `REJECTED` | The target named queue was at its `max_size` limit when `add_task()` was called. The task record is created with this status and `QueueFullError` is raised. Only occurs when the named queue system is active with a `max_size` limit. Can be retried via `POST /tasks/{task_id}/retry`. Terminal. |
 
 ---
 
@@ -64,6 +66,7 @@ class TaskRecord:
     source:            str
     priority:          int | None
     executor:          str | None
+    queue:             str
 ```
 
 ### Fields
@@ -88,8 +91,9 @@ Fields marked **auto** are set by the framework. Fields marked **caller** are pr
 | `tags` | `dict[str, str]` | caller | Key/value labels attached at enqueue time. Forwarded to every `LogEvent` and `LifecycleEvent`. Stored as part of the snapshot payload, not as a separate column. |
 | `encrypted_payload` | `bytes \| None` | auto | Fernet-encrypted `(args, kwargs)` when `encrypt_args_key` is configured on `TaskManager`. When present, `args` and `kwargs` are stored empty. Not included in `to_dict()` output or API responses. |
 | `source` | `str` | auto | How the task was created: `"manual"` for tasks enqueued via `add_task()`, `"scheduled"` for tasks fired by the periodic scheduler. |
-| `priority` | `int \| None` | caller | Priority level assigned at enqueue time. `None` when routed through the standard Starlette mechanism. Any integer when routed through the priority queue; higher values run first. |
+| `priority` | `int \| None` | caller | Priority level assigned at enqueue time. `None` when routed through the standard Starlette mechanism. Any integer when routed through the priority queue or named queue heap; higher values run first. |
 | `executor` | `str \| None` | auto | The executor that ran (or will run) this task: `"async"`, `"thread"`, or `"process"`. Reflects the effective executor after auto-detection. Shown in the dashboard detail panel. |
+| `queue` | `str` | auto | The named queue this task was routed into. Always `"default"` when the named queue system is not active. Set from the per-call `queue=` argument, then the decorator-level `queue=`, then `"default"`. |
 
 ### Properties
 
@@ -179,8 +183,49 @@ class TaskConfig:
 | `name` | `str \| None` | `None` | Display name in logs and the dashboard. Defaults to the function's `__name__`. |
 | `requeue_on_interrupt` | `bool` | `False` | When `True`, a task interrupted at shutdown is reset to `PENDING` and re-dispatched on next startup. Only safe for idempotent tasks. |
 | `eager` | `bool` | `False` | Dispatch via `asyncio.create_task` immediately when `add_task()` is called rather than after the response is sent. |
-| `priority` | `int \| None` | `None` | Execution priority. `None` routes through the standard Starlette mechanism. Any integer routes through the priority queue; higher values run first. |
+| `priority` | `int \| None` | `None` | Execution priority. `None` routes through the standard Starlette mechanism. Any integer routes through the priority queue or named queue heap; higher values run first. |
+| `queue` | `str \| None` | `None` | Named queue this function is routed into by default. `None` routes to `"default"` when the named queue system is active. |
 | `executor` | `str \| None` | `None` | Configured executor. `"async"`, `"thread"`, or `"process"`. `None` means auto-detect from the function signature at dispatch time. |
+
+---
+
+## QueueConfig
+
+`QueueConfig` holds the configuration for a single named queue. Pass instances of this in the `queues` dict when constructing `TaskManager`.
+
+```python
+from fastapi_taskflow.models import QueueConfig
+```
+
+```python
+@dataclass
+class QueueConfig:
+    concurrency: int | None = None
+    max_size:    int | None = None
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `concurrency` | `int \| None` | `None` | Maximum number of tasks from this queue that may run concurrently. When the limit is reached, the queue drainer blocks until a slot is released. `None` removes the limit. |
+| `max_size` | `int \| None` | `None` | Maximum number of tasks allowed to wait in this queue's heap. When the heap is full, `add_task()` creates a `REJECTED` task record and raises `QueueFullError`. `None` removes the limit. |
+
+`QueueConfig` fields can be updated at runtime via `PATCH /tasks/queues/{name}` or `TaskManager.update_queue_config()`. Changes take effect immediately for new tasks; in-flight tasks are not affected. Updated values are persisted to the backend and restored on the next startup.
+
+**Example:**
+
+```python
+from fastapi_taskflow import TaskManager
+from fastapi_taskflow.models import QueueConfig
+
+task_manager = TaskManager(
+    snapshot_db="tasks.db",
+    queues={
+        "email":   QueueConfig(concurrency=30, max_size=500),
+        "reports": QueueConfig(concurrency=4,  max_size=50),
+        "default": QueueConfig(concurrency=20),
+    },
+)
+```
 
 ---
 

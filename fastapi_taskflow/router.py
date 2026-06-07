@@ -27,6 +27,13 @@ class _BulkRetryBody(BaseModel):
     task_ids: list[str]
 
 
+class _QueueConfigBody(BaseModel):
+    """Request body for the PATCH /queues/{queue_name} endpoint."""
+
+    concurrency: Any = None
+    max_size: Any = None
+
+
 def _parse_since(since: str) -> datetime | None:
     """Parse a window string like '6h', '24h', '7d' into a cutoff datetime.
 
@@ -87,6 +94,19 @@ def create_router(
         return [t.to_dict() for t in await task_manager.merged_list()]
 
     # Fixed paths must be defined before the /{task_id} catch-all.
+    @router.get(
+        "/__peer/tasks",
+        summary="Internal peer tasks endpoint for multi-instance fan-out",
+        include_in_schema=False,
+    )
+    async def peer_tasks() -> list[dict[str, Any]]:
+        """Return this instance's local in-memory tasks only.
+
+        Used by peer instances during fan-out aggregation. Returns only local
+        records (not merged_list) to prevent circular fan-out chains.
+        """
+        return [t.to_dict() for t in task_manager.store.list()]
+
     @router.get("/audit", summary="Audit log of user actions")
     def get_audit() -> list[dict[str, Any]]:
         """Return the in-memory audit log (last 1000 entries, newest first).
@@ -127,6 +147,75 @@ def create_router(
             "avg_duration_seconds": round(avg_duration, 6),
         }
 
+    @router.get("/queues", summary="List all named queues with live stats")
+    def list_queues() -> list[dict[str, Any]]:
+        """Return configuration and live stats for every named queue.
+
+        Only returns data when the named queue system is active (i.e. the
+        :class:`~fastapi_taskflow.manager.TaskManager` was created with a
+        ``queues`` or ``max_size`` argument). Returns an empty list otherwise.
+
+        Each entry contains:
+
+        * ``name`` -- queue identifier string
+        * ``concurrency`` -- current concurrent task limit (``null`` = unlimited)
+        * ``max_size`` -- maximum tasks allowed to wait in the heap (``null`` = unlimited)
+        * ``pending`` -- number of tasks currently waiting in the heap
+        * ``running`` -- number of tasks from this queue currently executing
+        * ``finished`` -- number of terminal tasks from this queue in the store
+        """
+        return task_manager.queue_stats()
+
+    @router.patch(
+        "/queues/{queue_name}", summary="Update a named queue's configuration"
+    )
+    def update_queue(
+        queue_name: str, body: _QueueConfigBody, request: Request
+    ) -> dict[str, Any]:
+        """Update the concurrency limit and/or max_size of a named queue.
+
+        Changes take effect immediately for tasks entering the queue after this
+        call. In-flight tasks that already acquired a concurrency slot are not
+        interrupted.
+
+        Args:
+            queue_name: Name of the queue to update (must already exist).
+            body: JSON body with optional ``concurrency`` and ``max_size`` fields.
+                Pass ``null`` for either to remove that limit.
+
+        Returns:
+            Updated queue stats dict (same shape as entries from ``GET /queues``).
+
+        Raises:
+            404: If *queue_name* does not match any configured queue.
+            400: If the named queue system is not active.
+        """
+        if not task_manager._queues:
+            raise HTTPException(
+                status_code=400,
+                detail="Named queue system is not active. Pass queues= or max_size= to TaskManager.",
+            )
+        try:
+            updated = task_manager.update_queue_config(
+                queue_name,
+                concurrency=body.concurrency,
+                max_size=body.max_size,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        task_manager._audit_log.append(
+            AuditEntry(
+                entry_id=str(uuid.uuid4()),
+                action="update_queue",
+                task_id=queue_name,
+                actor=_actor(request, secret_key),
+                timestamp=__import__("datetime").datetime.utcnow(),
+                detail={"concurrency": body.concurrency, "max_size": body.max_size},
+            )
+        )
+        return updated
+
     @router.post("/bulk-retry", summary="Retry a specific set of failed tasks")
     async def bulk_retry(body: _BulkRetryBody, request: Request) -> dict[str, Any]:
         """Re-enqueue a list of failed or interrupted tasks by their task IDs.
@@ -164,7 +253,11 @@ def create_router(
             if record is None:
                 skipped += 1
                 continue
-            if record.status not in (TaskStatus.FAILED, TaskStatus.INTERRUPTED):
+            if record.status not in (
+                TaskStatus.FAILED,
+                TaskStatus.INTERRUPTED,
+                TaskStatus.REJECTED,
+            ):
                 skipped += 1
                 continue
 
@@ -176,6 +269,7 @@ def create_router(
             func, config = result
             new_task_id = str(uuid.uuid4())
             executor_obj = task_manager._resolve_executor(func, config)
+            run_queue = record.queue or "default"
 
             task_manager.store.create(
                 new_task_id,
@@ -184,6 +278,7 @@ def create_router(
                 record.kwargs,
                 tags=record.tags,
                 executor=executor_obj.name,
+                queue=run_queue,
             )
 
             wrapped = make_background_func(
@@ -201,9 +296,21 @@ def create_router(
                 running_tasks=task_manager._running_tasks,
             )
 
-            asyncio.create_task(wrapped())
+            if task_manager._queues:
+                task_manager._get_queue(run_queue).enqueue(
+                    new_task_id, record.priority, wrapped
+                )
+            else:
+                asyncio.create_task(wrapped())
             results.append({"original_task_id": task_id, "new_task_id": new_task_id})
             dispatched += 1
+
+        if task_manager.retry_replaces_original and results:
+            original_ids = [r["original_task_id"] for r in results]
+            for oid in original_ids:
+                task_manager.store.delete(oid)
+            if scheduler is not None:
+                asyncio.create_task(scheduler._backend.delete_records(original_ids))
 
         task_manager._audit_log.append(
             AuditEntry(
@@ -281,6 +388,7 @@ def create_router(
             func, config = result
             new_task_id = str(uuid.uuid4())
             executor_obj = task_manager._resolve_executor(func, config)
+            run_queue = record.queue or "default"
 
             task_manager.store.create(
                 new_task_id,
@@ -289,6 +397,7 @@ def create_router(
                 record.kwargs,
                 tags=record.tags,
                 executor=executor_obj.name,
+                queue=run_queue,
             )
 
             wrapped = make_background_func(
@@ -306,11 +415,23 @@ def create_router(
                 running_tasks=task_manager._running_tasks,
             )
 
-            asyncio.create_task(wrapped())
+            if task_manager._queues:
+                task_manager._get_queue(run_queue).enqueue(
+                    new_task_id, record.priority, wrapped
+                )
+            else:
+                asyncio.create_task(wrapped())
             results.append(
                 {"original_task_id": record.task_id, "new_task_id": new_task_id}
             )
             dispatched += 1
+
+        if task_manager.retry_replaces_original and results:
+            original_ids = [r["original_task_id"] for r in results]
+            for oid in original_ids:
+                task_manager.store.delete(oid)
+            if scheduler is not None:
+                asyncio.create_task(scheduler._backend.delete_records(original_ids))
 
         task_manager._audit_log.append(
             AuditEntry(
@@ -427,10 +548,14 @@ def create_router(
         if record is None:
             raise HTTPException(status_code=404, detail="Task not found")
 
-        if record.status not in (TaskStatus.FAILED, TaskStatus.INTERRUPTED):
+        if record.status not in (
+            TaskStatus.FAILED,
+            TaskStatus.INTERRUPTED,
+            TaskStatus.REJECTED,
+        ):
             raise HTTPException(
                 status_code=400,
-                detail=f"Only failed or interrupted tasks can be retried. "
+                detail=f"Only failed, interrupted, or rejected tasks can be retried. "
                 f"Current status: {record.status.value}",
             )
 
@@ -450,6 +575,8 @@ def create_router(
         backend = scheduler._backend if scheduler is not None else None
         on_success = scheduler.flush_one if scheduler is not None else None
 
+        run_queue = record.queue or "default"
+
         task_manager.store.create(
             new_task_id,
             func.__name__,
@@ -457,6 +584,7 @@ def create_router(
             record.kwargs,
             tags=record.tags,
             executor=executor_obj.name,
+            queue=run_queue,
         )
 
         wrapped = make_background_func(
@@ -474,7 +602,17 @@ def create_router(
             running_tasks=task_manager._running_tasks,
         )
 
-        asyncio.create_task(wrapped())
+        if task_manager._queues:
+            task_manager._get_queue(run_queue).enqueue(
+                new_task_id, record.priority, wrapped
+            )
+        else:
+            asyncio.create_task(wrapped())
+
+        if task_manager.retry_replaces_original:
+            task_manager.store.delete(task_id)
+            if scheduler is not None:
+                asyncio.create_task(scheduler._backend.delete_records([task_id]))
 
         task_manager._audit_log.append(
             AuditEntry(

@@ -126,6 +126,23 @@ class SnapshotBackend(ABC):
             if r.task_id in id_set and r.status.value == "success"
         }
 
+    async def delete_records(self, task_ids: "list[str]") -> int:
+        """Delete specific task records from the history store by their IDs.
+
+        Called when ``retry_replaces_original=True`` to remove the original
+        record after a retry is dispatched, so only the new run is visible.
+
+        The default is a no-op that returns 0. Override in backends that
+        support targeted deletion (SQLite, Redis, Postgres, MySQL).
+
+        Args:
+            task_ids: Task IDs to delete from the history store.
+
+        Returns:
+            Number of records deleted.
+        """
+        return 0
+
     async def delete_before(self, cutoff: datetime) -> int:
         """Delete terminal task records whose ``end_time`` is before *cutoff*.
 
@@ -166,6 +183,32 @@ class SnapshotBackend(ABC):
         scheduled firings.
         """
         return True
+
+    async def save_metadata(self, key: str, value: str) -> None:
+        """Persist a metadata string under *key*.
+
+        Used to store operator-edited queue config overrides so they survive
+        restarts. The default is a no-op; backends that share state across
+        instances (SQLite, Redis) override this to write to their store.
+
+        Args:
+            key: Identifier for the metadata entry (e.g. ``"queue_configs"``).
+            value: The value to store (arbitrary UTF-8 string, typically JSON).
+        """
+
+    async def load_metadata(self, key: str) -> "str | None":
+        """Return the value stored under *key*, or ``None`` if not found.
+
+        The default returns ``None`` (no-op); override in backends that
+        persist metadata across restarts.
+
+        Args:
+            key: Identifier for the metadata entry.
+
+        Returns:
+            The stored string, or ``None``.
+        """
+        return None
 
     @abstractmethod
     async def close(self) -> None:

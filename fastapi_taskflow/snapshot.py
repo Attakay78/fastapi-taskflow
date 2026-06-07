@@ -168,21 +168,39 @@ class SnapshotScheduler:
 
             executor_obj = self._task_manager._resolve_executor(func, config)
             self._task_manager.store.update(record.task_id, executor=executor_obj.name)
-            asyncio.create_task(
-                execute_task(
-                    func,
-                    record.task_id,
-                    config,
+
+            backend = self._backend
+            on_success = self.flush_one
+
+            async def _wrapped_task(
+                _func=func,
+                _record=record,
+                _config=config,
+                _executor=executor_obj,
+            ):
+                await execute_task(
+                    _func,
+                    _record.task_id,
+                    _config,
                     self._task_manager.store,
-                    record.args,
-                    record.kwargs,
-                    executor_obj=executor_obj,
-                    backend=self._backend,
+                    _record.args,
+                    _record.kwargs,
+                    executor_obj=_executor,
+                    backend=backend,
+                    on_success=on_success,
                     logger=self._task_manager.logger,
                     encryptor=self._task_manager.fernet,
                     running_tasks=self._task_manager._running_tasks,
                 )
-            )
+
+            if self._task_manager._queues:
+                # Route back to the queue the task originally ran in.
+                queue_name = record.queue or "default"
+                self._task_manager._get_queue(queue_name).enqueue(
+                    record.task_id, record.priority, _wrapped_task
+                )
+            else:
+                asyncio.create_task(_wrapped_task())
             dispatched += 1
             logger.info(
                 "fastapi-taskflow: requeued task %s (%s)",
@@ -210,7 +228,8 @@ class SnapshotScheduler:
         completed = [
             t
             for t in self._task_manager.store.list()
-            if t.status.value in ("success", "failed", "cancelled")
+            if t.status.value
+            in ("success", "failed", "cancelled", "interrupted", "rejected")
         ]
         if not completed:
             return 0

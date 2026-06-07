@@ -9,8 +9,8 @@ from typing import Any, Callable, Optional
 from fastapi import BackgroundTasks
 
 from .executor import make_background_func
-from .manager import TaskManager
-from .models import TaskConfig
+from .manager import QueueFullError, TaskManager
+from .models import TaskConfig, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,7 @@ class ManagedBackgroundTasks(BackgroundTasks):
         tags: Optional[dict[str, str]] = None,
         eager: Optional[bool] = None,
         priority: Optional[int] = None,
+        queue: Optional[str] = None,
         **kwargs: Any,
     ) -> str:
         """Enqueue *func* as a managed background task and return its ``task_id``.
@@ -90,11 +91,16 @@ class ManagedBackgroundTasks(BackgroundTasks):
                 dispatch is incompatible with ``executor='process'``; when both
                 are set a warning is logged and the task runs in-process instead.
             priority: Execution priority. Higher values run before lower ones.
-                Routes the task through the dedicated priority queue instead of
-                Starlette's background task list. Overrides the decorator-level
-                ``priority`` setting for this call only. The conventional range is
-                1 (lowest) to 10 (highest); any integer is accepted.
-            **kwargs: Keyword arguments forwarded to *func*.
+                When the named queue system is active, the task is placed in the
+                target queue's heap at this priority. In legacy mode, routes the
+                task through the dedicated priority worker. Overrides the
+                decorator-level ``priority`` setting for this call only.
+            queue: Named queue to route this task into. Overrides the
+                decorator-level ``queue`` setting for this call only. Ignored
+                when the named queue system is not active (i.e. no ``queues``
+                or ``max_size`` was passed to :class:`TaskManager`). When
+                omitted, the decorator-level ``queue`` is used; if that is also
+                ``None``, the task goes to the ``"default"`` queue.
 
         Returns:
             The ``task_id`` of the enqueued (or already-existing) task.
@@ -103,6 +109,9 @@ class ManagedBackgroundTasks(BackgroundTasks):
             TaskArgumentError: When *func* is registered with
                 ``executor='process'`` and any argument in *args* or *kwargs*
                 is not picklable. The error is raised before the task is stored.
+            QueueFullError: When the target named queue has reached its
+                configured ``max_size`` limit. Callers should catch this and
+                return an appropriate HTTP error (typically 429).
         """
         # In-process dedup: check the in-memory store first (fast, no I/O).
         if idempotency_key is not None:
@@ -118,6 +127,9 @@ class ManagedBackgroundTasks(BackgroundTasks):
             priority if priority is not None else config.priority
         )
         run_eager: bool = eager if eager is not None else config.eager
+
+        # Resolve the effective queue name. Per-call > decorator-level > "default".
+        run_queue: str = queue or config.queue or "default"
 
         # Resolve the executor that will run this task.
         executor_obj = self._task_manager._resolve_executor(func, config)
@@ -168,6 +180,7 @@ class ManagedBackgroundTasks(BackgroundTasks):
             encrypted_payload=encrypted_payload,
             priority=run_priority,
             executor=executor_obj.name,
+            queue=run_queue,
         )
 
         scheduler = self._task_manager._scheduler
@@ -190,15 +203,24 @@ class ManagedBackgroundTasks(BackgroundTasks):
             running_tasks=self._task_manager._running_tasks,
         )
 
-        if run_priority is not None:
-            # Priority queue: the worker coroutine dispatches tasks in priority
-            # order. Eager is ignored when priority is set -- the queue provides
-            # its own non-blocking dispatch path.
-            self._task_manager.enqueue_priority(task_id, run_priority, wrapped)
-        elif run_eager:
+        if run_eager:
+            # Eager tasks bypass all queues and dispatch immediately.
             asyncio.create_task(wrapped())
+        elif self._task_manager._queues:
+            # Named queue mode: route to the target queue's heap.
+            try:
+                self._task_manager._get_queue(run_queue).enqueue(
+                    task_id, run_priority, wrapped
+                )
+            except QueueFullError:
+                # Mark the already-created store record as REJECTED so the
+                # task is visible in the dashboard and can be re-run manually.
+                self._task_manager.store.update(task_id, status=TaskStatus.REJECTED)
+                raise
+        elif run_priority is not None:
+            # Legacy mode with priority: dedicated priority worker.
+            self._task_manager.enqueue_priority(task_id, run_priority, wrapped)
         else:
-            super().add_task(
-                wrapped
-            )  # appends to self.tasks (shared with native if set)
+            # Legacy mode: standard Starlette background task.
+            super().add_task(wrapped)
         return task_id

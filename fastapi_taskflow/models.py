@@ -4,6 +4,40 @@ from enum import Enum
 from typing import Any, Literal, Optional
 
 
+@dataclass
+class QueueConfig:
+    """Configuration for a named task queue.
+
+    Pass a dict of these to ``TaskManager(queues={...})`` to define named
+    queues with independent concurrency limits and backpressure caps.
+
+    Args:
+        concurrency: Maximum number of tasks from this queue that may be
+            running simultaneously. ``None`` means no limit. For async tasks
+            this caps in-flight coroutines; for thread tasks it caps threads
+            drawn from the shared pool.
+        max_size: Maximum number of tasks allowed to wait in this queue at
+            any one time. When the queue is full, ``add_task()`` raises
+            :exc:`~fastapi_taskflow.manager.QueueFullError` so callers can
+            return a 429 rather than silently growing memory without bound.
+            ``None`` means no limit.
+
+    Example::
+
+        task_manager = TaskManager(
+            max_sync_threads=10,
+            queues={
+                "email":   QueueConfig(concurrency=30, max_size=500),
+                "reports": QueueConfig(concurrency=4,  max_size=50),
+                "default": QueueConfig(concurrency=20),
+            },
+        )
+    """
+
+    concurrency: Optional[int] = None
+    max_size: Optional[int] = None
+
+
 class TaskStatus(str, Enum):
     """Lifecycle states a task moves through from creation to completion.
 
@@ -20,6 +54,7 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
     INTERRUPTED = "interrupted"
     CANCELLED = "cancelled"
+    REJECTED = "rejected"
 
 
 @dataclass
@@ -77,6 +112,7 @@ class TaskConfig:
     eager: bool = False
     priority: Optional[int] = None
     executor: Optional[Literal["async", "thread", "process"]] = None
+    queue: Optional[str] = None
 
 
 @dataclass
@@ -141,6 +177,38 @@ class TaskRecord:
     source: str = "manual"
     priority: int | None = None
     executor: Optional[Literal["async", "thread", "process"]] = None
+    queue: str = "default"
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "TaskRecord":
+        """Reconstruct a TaskRecord from a :meth:`to_dict` payload.
+
+        Fields not present in ``to_dict()`` output (``args``, ``kwargs``,
+        ``encrypted_payload``, ``idempotency_key``) default to their zero
+        values. This is the correct behaviour for peer fan-out records, which
+        are only read for display and never re-executed locally.
+        """
+
+        def _dt(v: Any) -> "datetime | None":
+            return datetime.fromisoformat(v) if v else None
+
+        return cls(
+            task_id=data["task_id"],
+            func_name=data["func_name"],
+            status=TaskStatus(data["status"]),
+            created_at=datetime.fromisoformat(data["created_at"]),
+            start_time=_dt(data.get("start_time")),
+            end_time=_dt(data.get("end_time")),
+            retries_used=data.get("retries_used", 0),
+            error=data.get("error"),
+            logs=list(data.get("logs", [])),
+            stacktrace=data.get("stacktrace"),
+            tags=dict(data.get("tags", {})),
+            source=data.get("source", "manual"),
+            priority=data.get("priority"),
+            executor=data.get("executor"),
+            queue=data.get("queue", "default"),
+        )
 
     @property
     def duration(self) -> float | None:
@@ -168,6 +236,7 @@ class TaskRecord:
             "source": self.source,
             "priority": self.priority,
             "executor": self.executor,
+            "queue": self.queue,
         }
 
 

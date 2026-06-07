@@ -38,19 +38,22 @@ __CSS_BLOCK__
 
 <main class="main">
 
-  <!-- Top row: metrics left, filters right -->
+  <!-- Top row: metrics+search left, filters right -->
   <div class="top-row">
-    <!-- Metrics -->
-    <div class="metrics">
-      <div class="metric-card mc-total">  <div class="metric-label">Total</div>        <div class="metric-value" id="metric-total">&#8212;</div></div>
-      <div class="metric-card mc-pending"><div class="metric-label">Pending</div>       <div class="metric-value" id="metric-pending">&#8212;</div></div>
-      <div class="metric-card mc-running"><div class="metric-label">Running</div>       <div class="metric-value" id="metric-running">&#8212;</div></div>
-      <div class="metric-card mc-success"><div class="metric-label">Success</div>       <div class="metric-value" id="metric-success">&#8212;</div></div>
-      <div class="metric-card mc-failed"> <div class="metric-label">Failed</div>        <div class="metric-value" id="metric-failed">&#8212;</div></div>
-      <div class="metric-card mc-interrupted"><div class="metric-label">Interrupted</div>  <div class="metric-value" id="metric-interrupted">&#8212;</div></div>
-      <div class="metric-card mc-cancelled"><div class="metric-label">Cancelled</div>    <div class="metric-value" id="metric-cancelled">&#8212;</div></div>
-      <div class="metric-card mc-rate">   <div class="metric-label">Success Rate</div> <div class="metric-value" id="metric-rate">&#8212;</div></div>
-      <div class="metric-card mc-avg">    <div class="metric-label">Avg Duration</div> <div class="metric-value" id="metric-avg">&#8212;</div></div>
+    <!-- Metrics + search stacked in left column -->
+    <div class="metrics-col">
+      <div class="metrics">
+        <div class="metric-card mc-total">  <div class="metric-label">Total</div>        <div class="metric-value" id="metric-total">&#8212;</div></div>
+        <div class="metric-card mc-pending"><div class="metric-label">Pending</div>       <div class="metric-value" id="metric-pending">&#8212;</div></div>
+        <div class="metric-card mc-running"><div class="metric-label">Running</div>       <div class="metric-value" id="metric-running">&#8212;</div></div>
+        <div class="metric-card mc-success"><div class="metric-label">Success</div>       <div class="metric-value" id="metric-success">&#8212;</div></div>
+        <div class="metric-card mc-failed"> <div class="metric-label">Failed</div>        <div class="metric-value" id="metric-failed">&#8212;</div></div>
+        <div class="metric-card mc-interrupted"><div class="metric-label">Interrupted</div>  <div class="metric-value" id="metric-interrupted">&#8212;</div></div>
+        <div class="metric-card mc-cancelled"><div class="metric-label">Cancelled</div>    <div class="metric-value" id="metric-cancelled">&#8212;</div></div>
+        <div class="metric-card mc-rate">   <div class="metric-label">Success Rate</div> <div class="metric-value" id="metric-rate">&#8212;</div></div>
+        <div class="metric-card mc-avg">    <div class="metric-label">Avg Duration</div> <div class="metric-value" id="metric-avg">&#8212;</div></div>
+      </div>
+      <input type="search" class="search" id="search-input" placeholder="Search by ID or function&#8230;" autocomplete="off">
     </div>
     <!-- Filters -->
     <div class="filters-right">
@@ -62,6 +65,7 @@ __CSS_BLOCK__
         <option value="failed">Failed</option>
         <option value="interrupted">Interrupted</option>
         <option value="cancelled">Cancelled</option>
+        <option value="rejected">Rejected</option>
       </select>
       <select class="sel" id="func-filter">
         <option value="all">All functions</option>
@@ -70,21 +74,19 @@ __CSS_BLOCK__
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
         <span id="time-filter-label">All time</span>
       </button>
+      <select class="sel" id="queue-filter">
+        <option value="all">All queues</option>
+      </select>
       <button class="filter-trigger-btn" onclick="exportCsv()" title="Export current view as CSV">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         Export CSV
       </button>
+      <button class="filter-trigger-btn filter-trigger-btn--danger" onclick="openClearHistoryPopup()">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+        Clear history
+      </button>
     </div>
-  </div>
-
-  <!-- Search + clear history row -->
-  <div class="search-row">
-    <input type="search" class="search" id="search-input" placeholder="Search by ID or function&#8230;" autocomplete="off">
-    <button class="filter-trigger-btn filter-trigger-btn--danger" onclick="openClearHistoryPopup()">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
-      Clear history
-    </button>
-  </div>
+  </div><!-- end .top-row -->
 
   <!-- Tab bar -->
   <div class="tab-bar">
@@ -92,6 +94,7 @@ __CSS_BLOCK__
     <button class="tab-btn" id="tab-deadletters" onclick="showTab('deadletters')">Dead Letters<span class="tab-count" id="tab-deadletters-count" style="background:rgba(220,38,38,.12);color:#dc2626"></span></button>
     <button class="tab-btn" id="tab-audit" onclick="showTab('audit')" style="display:none">Audit<span class="tab-count" id="tab-audit-count"></span></button>
     <button class="tab-btn" id="tab-schedules" onclick="showTab('schedules')">Schedules<span class="tab-count" id="tab-schedules-count"></span></button>
+    <button class="tab-btn" id="tab-queues" onclick="showTab('queues')">Queues<span class="tab-count" id="tab-queues-count"></span></button>
     <button class="tab-btn" id="tab-tasks" onclick="showTab('tasks')">Tasks<span class="tab-count" id="tab-tasks-count"></span></button>
   </div>
 
@@ -113,6 +116,7 @@ __CSS_BLOCK__
           <th class="th th--check"><input type="checkbox" class="row-check" id="select-all-check" onclick="toggleSelectAll(this)" title="Select all retryable on this page"></th>
           <th class="th" data-sort="task_id" onclick="setSort('task_id')">ID <span class="sort-icon">&#8661;</span></th>
           <th class="th" data-sort="func_name" onclick="setSort('func_name')">Function <span class="sort-icon">&#8661;</span></th>
+          <th class="th" data-sort="queue" onclick="setSort('queue')">Queue <span class="sort-icon">&#8661;</span></th>
           <th class="th" data-sort="status" onclick="setSort('status')">Status <span class="sort-icon">&#8661;</span></th>
           <th class="th" data-sort="duration" onclick="setSort('duration')">Duration <span class="sort-icon">&#8661;</span></th>
           <th class="th" data-sort="retries_used" onclick="setSort('retries_used')">Retries <span class="sort-icon">&#8661;</span></th>
@@ -122,7 +126,7 @@ __CSS_BLOCK__
         </tr>
       </thead>
       <tbody id="tasks-tbody">
-        <tr><td colspan="9" class="empty">Connecting&#8230;</td></tr>
+        <tr><td colspan="10" class="empty">Connecting&#8230;</td></tr>
       </tbody>
     </table>
   </div>
@@ -200,6 +204,13 @@ __CSS_BLOCK__
         </tr></thead>
         <tbody id="schedules-tbody"></tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- Queues panel -->
+  <div id="panel-queues" style="display:none">
+    <div id="queues-content" style="padding:4px 0">
+      <div style="color:#9ca3af;padding:40px;text-align:center;font-size:0.9rem">Loading&#8230;</div>
     </div>
   </div>
 

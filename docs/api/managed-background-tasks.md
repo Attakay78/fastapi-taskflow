@@ -40,6 +40,7 @@ def add_task(
     tags: dict[str, str] | None = None,
     eager: bool | None = None,
     priority: int | None = None,
+    queue: str | None = None,
     **kwargs: Any,
 ) -> str
 ```
@@ -55,7 +56,8 @@ This overrides `BackgroundTasks.add_task()`, which returns `None`. If you are al
 | `idempotency_key` | `str \| None` | `None` | Deduplication key. If a non-failed task with the same key already exists in the store or backend, its `task_id` is returned and `func` is not enqueued again. |
 | `tags` | `dict[str, str] \| None` | `None` | Key/value labels attached to this task. Forwarded to every `LogEvent` and `LifecycleEvent` emitted for the task. |
 | `eager` | `bool \| None` | `None` | When `True`, dispatch via `asyncio.create_task` immediately rather than waiting for the response to be sent. Overrides the decorator-level `eager` setting for this call only. |
-| `priority` | `int \| None` | `None` | Route through the priority queue instead of Starlette's background task list. Higher values run first; the conventional range is 1 (lowest) to 10 (highest). Overrides the decorator-level `priority` for this call only. Mutually exclusive with `eager`: when `priority` is set, `eager` is ignored. |
+| `priority` | `int \| None` | `None` | Route through the priority queue instead of Starlette's background task list. Higher values run first; the conventional range is 1 (lowest) to 10 (highest). Overrides the decorator-level `priority` for this call only. When named queues are active, controls ordering within the target queue's heap. Mutually exclusive with `eager`: when `priority` is set, `eager` is ignored. |
+| `queue` | `str \| None` | `None` | Named queue to route this task into. Overrides the decorator-level `queue` for this call only. Only effective when the named queue system is active (any `queues=` or `max_size=` argument was passed to `TaskManager`). Raises `QueueFullError` if the target queue is at its `max_size` limit. |
 | `**kwargs` | `Any` | | Keyword arguments forwarded to `func`. |
 
 **Examples:**

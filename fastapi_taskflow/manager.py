@@ -10,6 +10,8 @@ import time
 import weakref
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, cast
 
+import heapq
+
 from fastapi import BackgroundTasks
 
 from .executors.async_executor import AsyncExecutor
@@ -17,7 +19,7 @@ from .executors.process_executor import LazyProcessExecutor
 from .executors.thread_executor import ThreadExecutor
 from .loggers.chain import LoggerChain
 from .loggers.file import FileLogger
-from .models import TaskConfig
+from .models import QueueConfig, TaskConfig
 from .registry import TaskRegistry
 from .store import TaskStore
 
@@ -29,8 +31,186 @@ if TYPE_CHECKING:
     from .loggers.base import TaskObserver
     from .loggers.chain import LoggerChain
     from .models import TaskRecord
+    from .instance_registry import InstanceRegistry
     from .periodic import PeriodicScheduler
     from .wrapper import ManagedBackgroundTasks
+
+
+class QueueFullError(RuntimeError):
+    """Raised by ``add_task()`` when a named queue has reached its ``max_size`` limit.
+
+    Callers should catch this and return an appropriate HTTP response (typically
+    429 Too Many Requests) rather than letting it propagate as a 500.
+
+    Example::
+
+        from fastapi_taskflow import QueueFullError
+
+        @app.post("/export")
+        def export(tasks=Depends(task_manager.background_tasks)):
+            try:
+                task_id = tasks.add_task(generate_report, user_id)
+            except QueueFullError:
+                raise HTTPException(429, "Report queue is full, try again later")
+            return {"task_id": task_id}
+    """
+
+
+class _TaskQueue:
+    """An in-process priority queue with optional concurrency and size limits.
+
+    Each named queue owns a heap (for task ordering by priority), an optional
+    semaphore (for concurrency capping), and a long-lived drainer coroutine
+    that continuously pops tasks and dispatches them.
+
+    The heap stores ``(-priority, seq, task_id, wrapped_callable)`` tuples.
+    Negating priority makes Python's min-heap return the highest-priority
+    task first. The sequence number breaks ties between equal priorities in
+    arrival order (FIFO).
+
+    This class is internal. Users interact with named queues through
+    :class:`~fastapi_taskflow.manager.TaskManager` and
+    :class:`~fastapi_taskflow.models.QueueConfig`.
+
+    Args:
+        name: Queue identifier, used in log messages and API responses.
+        config: The :class:`~fastapi_taskflow.models.QueueConfig` that governs
+            this queue's concurrency limit and max pending size.
+    """
+
+    def __init__(self, name: str, config: QueueConfig) -> None:
+        self.name = name
+        self.config = config
+
+        # _heap stores (-priority, seq, task_id, wrapped) tuples.
+        # Access must be protected by _heap_lock since add_task can be called
+        # from request handlers (any thread) while the drainer runs on the
+        # event loop.
+        self._heap: list = []
+        self._heap_lock = threading.Lock()
+        self._seq: int = 0
+
+        # Signals the drainer that at least one item is waiting.
+        self._has_work: asyncio.Event | None = None
+
+        # Semaphore created at startup (needs running event loop for older Python).
+        self._sem: asyncio.Semaphore | None = None
+
+        # The drainer asyncio.Task started by TaskManager.startup().
+        self._drainer_task: asyncio.Task | None = None
+
+        # Cumulative count of tasks rejected by QueueFullError since startup.
+        self._rejected_count: int = 0
+
+    def _setup(self) -> None:
+        """Create asyncio primitives once the event loop is running.
+
+        Called by :meth:`~fastapi_taskflow.manager.TaskManager.startup` so
+        that ``asyncio.Event`` and ``asyncio.Semaphore`` are bound to the
+        correct running loop.
+        """
+        self._has_work = asyncio.Event()
+        self._sem = (
+            asyncio.Semaphore(self.config.concurrency)
+            if self.config.concurrency is not None
+            else None
+        )
+
+    def enqueue(self, task_id: str, priority: int | None, wrapped: Any) -> None:
+        """Push a task onto the heap, respecting the ``max_size`` limit.
+
+        Args:
+            task_id: The UUID of the already-created store record.
+            priority: Execution priority. Higher integers run first. Pass
+                ``None`` for tasks without an explicit priority (they run in
+                arrival order alongside any ``priority=0`` tasks).
+            wrapped: Zero-argument async callable produced by
+                :func:`~fastapi_taskflow.executor.make_background_func`.
+
+        Raises:
+            QueueFullError: When ``config.max_size`` is set and the number of
+                tasks currently waiting in the heap equals or exceeds that limit.
+        """
+        with self._heap_lock:
+            if (
+                self.config.max_size is not None
+                and len(self._heap) >= self.config.max_size
+            ):
+                self._rejected_count += 1
+                raise QueueFullError(
+                    f"Queue '{self.name}' is full ({self.config.max_size} tasks pending). "
+                    "Raise max_size or reduce enqueue rate."
+                )
+            self._seq += 1
+            # Negate priority so the min-heap pops highest-priority first.
+            heapq.heappush(self._heap, (-(priority or 0), self._seq, task_id, wrapped))
+
+        if self._has_work is not None:
+            self._has_work.set()
+
+    @property
+    def pending_count(self) -> int:
+        """Number of tasks currently waiting in the heap."""
+        with self._heap_lock:
+            return len(self._heap)
+
+    async def _drainer(self) -> None:
+        """Continuously drain the heap and dispatch tasks as asyncio Tasks.
+
+        Waits for the ``_has_work`` event, then pops tasks one by one. If a
+        concurrency semaphore is configured, it is acquired before dispatch
+        and released inside ``_run_slot`` when the task completes. This means
+        the drainer may briefly block at ``await self._sem.acquire()`` when
+        all concurrency slots are full, which is intentional: it creates
+        back-pressure at the dispatch point without blocking the event loop
+        for other coroutines.
+
+        Cancelled cleanly by :meth:`~fastapi_taskflow.manager.TaskManager.shutdown`.
+        Any tasks still in the heap at that point remain as ``PENDING`` in the
+        store and are handled by the snapshot backend on next startup.
+        """
+        assert self._has_work is not None, "_setup() must be called before _drainer()"
+        while True:
+            try:
+                await self._has_work.wait()
+                while True:
+                    with self._heap_lock:
+                        if not self._heap:
+                            self._has_work.clear()
+                            break
+                        _, _, _task_id, wrapped = heapq.heappop(self._heap)
+                    if self._sem is not None:
+                        await self._sem.acquire()
+                    asyncio.create_task(self._run_slot(wrapped))
+            except asyncio.CancelledError:
+                break
+
+    async def _run_slot(self, wrapped: Any) -> None:
+        """Run a task and release the concurrency semaphore slot when done.
+
+        Args:
+            wrapped: Zero-argument async callable from
+                :func:`~fastapi_taskflow.executor.make_background_func`.
+        """
+        try:
+            await wrapped()
+        finally:
+            if self._sem is not None:
+                self._sem.release()
+
+    def stats(self) -> dict:
+        """Return a snapshot of this queue's current state for the API and dashboard.
+
+        Returns:
+            Dict with ``name``, ``concurrency``, ``max_size``, and
+            ``pending`` (number of tasks waiting in the heap).
+        """
+        return {
+            "name": self.name,
+            "concurrency": self.config.concurrency,
+            "max_size": self.config.max_size,
+            "pending": self.pending_count,
+        }
 
 
 class _DaemonThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
@@ -125,6 +305,13 @@ class TaskManager:
         max_process_workers: Optional[int] = None,
         process_shutdown_timeout: float = 30.0,
         retention_days: Optional[float] = None,
+        queues: Optional[dict[str, "QueueConfig"]] = None,
+        max_size: Optional[int] = None,
+        retry_replaces_original: bool = True,
+        instance_url: Optional[str] = None,
+        instance_tasks_prefix: str = "",
+        registry_ttl: int = 90,
+        registry_heartbeat: int = 30,
     ) -> None:
         """
         Args:
@@ -233,6 +420,70 @@ class TaskManager:
                 approximately every 6 hours during the snapshot loop. Defaults
                 to ``None`` (no automatic pruning). Can also be set via
                 ``TaskAdmin(retention_days=...)``.
+            queues: Named queues with individual concurrency and backpressure
+                settings. When provided, all tasks (except those dispatched
+                with ``eager=True``) are routed through the named queue system
+                instead of the standard Starlette ``BackgroundTasks`` path. A
+                ``"default"`` queue is created automatically if not included;
+                its ``concurrency`` defaults to *max_concurrent_tasks* and its
+                ``max_size`` defaults to *max_size*::
+
+                    from fastapi_taskflow import QueueConfig
+
+                    TaskManager(
+                        max_sync_threads=10,
+                        queues={
+                            "email":   QueueConfig(concurrency=30, max_size=500),
+                            "reports": QueueConfig(concurrency=4,  max_size=50),
+                        },
+                    )
+
+            max_size: Global backpressure limit for the implicit ``"default"``
+                queue. When the default queue has this many tasks pending,
+                ``add_task()`` raises :exc:`QueueFullError`. Ignored when
+                *queues* defines its own ``"default"`` entry. Setting this
+                parameter activates the named queue system even if *queues*
+                is not provided::
+
+                    TaskManager(max_size=1000)
+
+            retry_replaces_original: When ``True``, retrying a task via the
+                API (single retry, bulk retry, or the timed bulk retry) removes
+                the original record from the in-memory store and the backend
+                after the new task is dispatched. The new task carries the same
+                function, args, and kwargs as the original. The dashboard and
+                history log will show only the new run.
+
+                When ``False``, both records are kept. The original stays
+                visible in its terminal state (``failed``, ``interrupted``,
+                or ``rejected``) and the new task appears alongside it as a
+                separate entry::
+
+                    TaskManager(retry_replaces_original=True)
+
+            instance_url: Public base URL of this instance, e.g.
+                ``"http://10.0.0.1:8000"``. When set alongside a shared backend
+                that implements ``save_metadata`` / ``load_metadata`` (SQLite,
+                Redis, Postgres, MySQL), this instance registers itself in the
+                backend so that the dashboard can fan out to all peers and show
+                an aggregated task view. Requires a backend to be configured.
+                No registration or fan-out occurs when this is ``None``::
+
+                    TaskManager(
+                        snapshot_backend=RedisBackend("redis://redis:6379"),
+                        instance_url="http://10.0.0.1:8000",
+                    )
+
+            instance_tasks_prefix: URL prefix where the tasks router is mounted
+                on this instance, e.g. ``"/api/tasks"``. Used by peers to build
+                the fan-out URL ``{instance_url}{instance_tasks_prefix}/__peer/tasks``.
+                Must match the prefix passed to ``TaskAdmin`` or the router
+                ``prefix=`` argument. Defaults to ``""`` (tasks router at root).
+            registry_ttl: Seconds before a peer registry entry is considered
+                stale and excluded from fan-out calls. Should be at least
+                ``2 * registry_heartbeat``. Defaults to ``90``.
+            registry_heartbeat: Seconds between heartbeat writes that keep
+                this instance's registry entry fresh. Defaults to ``30``.
         """
         self.registry = TaskRegistry()
         self.store = TaskStore()
@@ -278,6 +529,12 @@ class TaskManager:
         }
 
         self._process_shutdown_timeout = process_shutdown_timeout
+        self.retry_replaces_original = retry_replaces_original
+        self._instance_url = instance_url
+        self._instance_tasks_prefix = instance_tasks_prefix
+        self._registry_ttl = registry_ttl
+        self._registry_heartbeat = registry_heartbeat
+        self._instance_registry: Optional["InstanceRegistry"] = None
 
         self.fernet: Any = None
         if encrypt_args_key is not None:
@@ -333,6 +590,23 @@ class TaskManager:
         self._priority_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
         self._priority_seq: int = 0
         self._priority_worker_task: Optional[asyncio.Task] = None
+
+        # Named queue system. Active when `queues` or `max_size` is provided.
+        # _queue_configs holds the raw QueueConfig values; _queues holds the
+        # live _TaskQueue objects created at startup (needs a running event loop).
+        _use_named_queues = queues is not None or max_size is not None
+        if _use_named_queues:
+            _all_configs: dict[str, QueueConfig] = dict(queues or {})
+            if "default" not in _all_configs:
+                _all_configs["default"] = QueueConfig(
+                    concurrency=max_concurrent_tasks,
+                    max_size=max_size,
+                )
+            self._queue_configs: dict[str, QueueConfig] = _all_configs
+        else:
+            self._queue_configs = {}
+        # Populated at startup once the event loop is running.
+        self._queues: dict[str, _TaskQueue] = {}
 
         self._app: Optional["FastAPI"] = None
         self._shutdown_event: asyncio.Event | None = None
@@ -419,9 +693,53 @@ class TaskManager:
             self._periodic_scheduler.start()
         if self.logger is not None:
             await self.logger.startup()
-        self._priority_worker_task = asyncio.create_task(
-            self._run_priority_worker(), name="taskflow-priority-worker"
-        )
+
+        if self._instance_url and self._scheduler is not None:
+            from .instance_registry import InstanceRegistry
+
+            self._instance_registry = InstanceRegistry(
+                backend=self._scheduler._backend,
+                instance_url=self._instance_url,
+                tasks_prefix=self._instance_tasks_prefix,
+                ttl=self._registry_ttl,
+                heartbeat_interval=self._registry_heartbeat,
+            )
+            await self._instance_registry.start()
+
+        # Start named queue drainers when the queue system is active.
+        if self._queue_configs:
+            # Load any queue config overrides persisted by a previous
+            # update_queue_config() call so live edits survive restarts.
+            if self._scheduler is not None:
+                import json as _json
+
+                try:
+                    raw = await self._scheduler._backend.load_metadata("queue_configs")
+                    if raw:
+                        overrides: dict = _json.loads(raw)
+                        for qname, vals in overrides.items():
+                            if qname in self._queue_configs:
+                                self._queue_configs[qname].concurrency = vals.get(
+                                    "concurrency"
+                                )
+                                self._queue_configs[qname].max_size = vals.get(
+                                    "max_size"
+                                )
+                except Exception:
+                    pass  # corrupt or missing metadata is not fatal
+
+            for name, config in self._queue_configs.items():
+                q = _TaskQueue(name, config)
+                q._setup()
+                q._drainer_task = asyncio.create_task(
+                    q._drainer(), name=f"taskflow-queue-{name}"
+                )
+                self._queues[name] = q
+        else:
+            # Legacy mode: single priority queue worker.
+            self._priority_worker_task = asyncio.create_task(
+                self._run_priority_worker(), name="taskflow-priority-worker"
+            )
 
     async def shutdown(self) -> None:
         """Run all shutdown tasks for this manager.
@@ -451,7 +769,20 @@ class TaskManager:
         if self._shutdown_event is not None:
             self._shutdown_event.set()
         self.store.notify_shutdown()
-        if self._priority_worker_task is not None:
+
+        # Stop named queue drainers when the queue system is active.
+        if self._queues:
+            for q in self._queues.values():
+                if q._drainer_task is not None:
+                    q._drainer_task.cancel()
+                    try:
+                        await q._drainer_task
+                    except asyncio.CancelledError:
+                        pass
+                    q._drainer_task = None
+            self._queues.clear()
+        elif self._priority_worker_task is not None:
+            # Legacy mode cleanup.
             self._priority_worker_task.cancel()
             try:
                 await self._priority_worker_task
@@ -460,6 +791,9 @@ class TaskManager:
             self._priority_worker_task = None
         if self._periodic_scheduler is not None:
             self._periodic_scheduler.stop()
+        if self._instance_registry is not None:
+            await self._instance_registry.stop()
+            self._instance_registry = None
         if self._scheduler is not None:
             self._scheduler.stop()
             await self._scheduler.flush()
@@ -563,6 +897,132 @@ class TaskManager:
     # Priority queue
     # ------------------------------------------------------------------
 
+    def _get_queue(self, name: str) -> "_TaskQueue":
+        """Return the live queue object for *name*, falling back to ``"default"``.
+
+        Called at task dispatch time by
+        :class:`~fastapi_taskflow.wrapper.ManagedBackgroundTasks`. If *name*
+        does not match any configured queue, the default queue is returned and
+        a warning is logged so misconfigured ``queue=`` values are visible
+        without crashing the request.
+
+        Args:
+            name: The queue name specified on ``add_task()`` or via the
+                ``@task_manager.task(queue=...)`` decorator.
+
+        Returns:
+            The :class:`_TaskQueue` registered under *name*, or the
+            ``"default"`` queue if *name* is not found.
+        """
+        q = self._queues.get(name)
+        if q is None:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "fastapi-taskflow: unknown queue %r, routing to 'default'.", name
+            )
+            q = self._queues["default"]
+        return q
+
+    def queue_stats(self) -> list[dict]:
+        """Return a snapshot of every named queue's configuration and live state.
+
+        Includes the queue name, configured limits, number of tasks currently
+        waiting in the heap, and the number of running and finished tasks drawn
+        from the in-memory store.
+
+        Returns:
+            List of dicts, one per queue, sorted by name. Each dict contains:
+            ``name``, ``concurrency``, ``max_size``, ``pending`` (heap depth),
+            ``running`` (store count), and ``finished`` (terminal store count).
+        """
+        result = []
+        all_records = self.store.list()
+        for name, q in sorted(self._queues.items()):
+            queue_records = [r for r in all_records if r.queue == name]
+            running = sum(1 for r in queue_records if r.status.value == "running")
+            finished = sum(
+                1
+                for r in queue_records
+                if r.status.value in ("success", "failed", "interrupted", "cancelled")
+            )
+            rejected = sum(1 for r in queue_records if r.status.value == "rejected")
+            s = q.stats()
+            s["running"] = running
+            s["finished"] = finished
+            s["rejected"] = rejected
+            result.append(s)
+        return result
+
+    def update_queue_config(
+        self, name: str, concurrency: Optional[int], max_size: Optional[int]
+    ) -> dict:
+        """Update the concurrency and/or max_size of a live named queue.
+
+        Changes take effect immediately for new tasks entering the queue.
+        In-flight tasks that already acquired a semaphore slot are not affected.
+        If the new concurrency is larger than the old value, the semaphore is
+        released enough times to grant the extra slots; if smaller, the
+        difference is silently absorbed as existing slots are released naturally.
+
+        Args:
+            name: Queue name. Must match an existing configured queue.
+            concurrency: New concurrency limit, or ``None`` to remove the limit.
+            max_size: New maximum pending size, or ``None`` to remove the limit.
+
+        Returns:
+            The updated queue stats dict from :meth:`_TaskQueue.stats`.
+
+        Raises:
+            KeyError: If *name* is not a known queue.
+        """
+        q = self._queues.get(name)
+        if q is None:
+            raise KeyError(f"No queue named {name!r}.")
+
+        old_concurrency = q.config.concurrency
+        q.config.concurrency = concurrency
+        q.config.max_size = max_size
+
+        # Adjust the live semaphore to reflect the new concurrency value.
+        if concurrency is None:
+            q._sem = None
+        elif old_concurrency is None or q._sem is None:
+            q._sem = asyncio.Semaphore(concurrency)
+        else:
+            diff = concurrency - old_concurrency
+            if diff > 0:
+                # More slots available: release the difference so waiting
+                # dispatches can proceed immediately.
+                for _ in range(diff):
+                    q._sem.release()
+            # Shrinking: existing _sem value is fine; slots drain naturally.
+            # We replace the semaphore object with a fresh one at the new value
+            # so that the internal counter is correct from this point forward.
+            q._sem = asyncio.Semaphore(concurrency)
+
+        # Update the config registry and persist to the backend if available.
+        if name in self._queue_configs:
+            self._queue_configs[name] = q.config
+
+        if self._scheduler is not None:
+            import json as _json
+
+            payload = {
+                qname: {"concurrency": cfg.concurrency, "max_size": cfg.max_size}
+                for qname, cfg in self._queue_configs.items()
+            }
+            try:
+                asyncio.get_event_loop().create_task(
+                    self._scheduler._backend.save_metadata(
+                        "queue_configs", _json.dumps(payload)
+                    )
+                )
+            except RuntimeError:
+                pass  # no running loop in test context
+
+        return q.stats()
+
     def enqueue_priority(self, task_id: str, priority: int, wrapped: Any) -> None:
         """Push a wrapped task onto the priority queue.
 
@@ -621,6 +1081,7 @@ class TaskManager:
         requeue_on_interrupt: bool = False,
         eager: bool = False,
         priority: Optional[int] = None,
+        queue: Optional[str] = None,
     ) -> Callable:
         """Register a function as a managed background task.
 
@@ -677,6 +1138,12 @@ class TaskManager:
                 Conventional range is 1 (lowest) to 10 (highest). Per-call
                 ``priority`` on ``add_task()`` overrides this value. ``None``
                 uses the standard dispatch path (existing behaviour).
+            queue: Named queue to route tasks from this function into. Must
+                match a key in the ``queues`` dict passed to
+                :class:`~fastapi_taskflow.manager.TaskManager`. Per-call
+                ``queue`` on ``add_task()`` overrides this value. ``None``
+                routes to the ``"default"`` queue when the named queue system
+                is active, or to the standard Starlette path otherwise.
 
         Example::
 
@@ -702,6 +1169,7 @@ class TaskManager:
                 eager=eager,
                 priority=priority,
                 executor=executor,
+                queue=queue,
             )
             # Run static validation on the decorated function if an executor
             # was explicitly requested. Auto-detected executors have no
@@ -734,6 +1202,7 @@ class TaskManager:
         run_on_startup: bool = False,
         timezone: str = "UTC",
         executor: Optional[Literal["async", "thread", "process"]] = None,
+        queue: Optional[str] = None,
     ) -> Callable:
         """Register a function as a periodic background task.
 
@@ -767,6 +1236,10 @@ class TaskManager:
                 When ``None``, the executor is auto-detected from the function
                 signature. Process tasks must be module-level importable
                 functions.
+            queue: Named queue to route each firing into. When the named
+                queue system is active (``queues=`` passed to
+                :class:`TaskManager`), the task is subject to that queue's
+                concurrency limit and backpressure. Defaults to ``"default"``.
 
         Example::
 
@@ -780,6 +1253,10 @@ class TaskManager:
 
             @task_manager.schedule(every=3600, executor="process")
             def rebuild_index() -> None:
+                ...
+
+            @task_manager.schedule(every=60, queue="reports")
+            def sync_report() -> None:
                 ...
 
         Raises:
@@ -802,6 +1279,7 @@ class TaskManager:
                 backoff=backoff,
                 name=name or func.__name__,
                 executor=executor,
+                queue=queue,
             )
             if executor is not None:
                 self._executors[executor].validate(func)
@@ -912,7 +1390,17 @@ class TaskManager:
                     self._backend_cache_ts = time.monotonic()
 
         merged: dict[str, "TaskRecord"] = {r.task_id: r for r in self._backend_cache}
-        # In-memory always wins -- live status is more current than the snapshot.
+
+        # Overlay peer tasks from other instances. Peer records are more current
+        # than the backend snapshot but less current than this instance's live store.
+        if self._instance_registry is not None:
+            from .fan_out import gather_peer_records
+
+            peer_records = await gather_peer_records(self._instance_registry)
+            for r in peer_records:
+                merged[r.task_id] = r
+
+        # In-memory always wins -- live status is more current than any snapshot.
         merged.update(live)
         return list(merged.values())
 

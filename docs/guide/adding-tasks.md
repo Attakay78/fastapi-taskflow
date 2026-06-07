@@ -97,9 +97,9 @@ def process_invoice(user_id: int) -> None:
 
 See [Task Context](task-context.md) for the full `get_task_context()` API.
 
-## Overriding eager and priority per call
+## Overriding eager, priority, and queue per call
 
-The `eager` and `priority` values set on the decorator apply to every call. You can override them for a specific enqueue without changing the decorator:
+The `eager`, `priority`, and `queue` values set on the decorator apply to every call. You can override them for a specific enqueue without changing the decorator:
 
 ```python
 # Normally this task runs after the response.
@@ -108,11 +108,16 @@ task_id = tasks.add_task(send_email, email, eager=True)
 
 # Route this call through the priority queue at level 9.
 task_id = tasks.add_task(send_alert, message, priority=9)
+
+# Route this call into a specific named queue.
+task_id = tasks.add_task(generate_report, user_id, queue="reports")
 ```
 
 **`eager=True`**: The task is dispatched via `asyncio.create_task` immediately when `add_task()` is called, before FastAPI sends the response. Use this when you need the task to start before the response goes out.
 
-**`priority`**: Routes the task through the priority queue instead of the standard background task list. Higher integers run first. The conventional range is 1 (lowest) to 10 (highest), but any integer is accepted. Tasks with the same priority execute in arrival order (FIFO).
+**`priority`**: Routes the task through the priority queue instead of the standard background task list. Higher integers run first. The conventional range is 1 (lowest) to 10 (highest), but any integer is accepted. Tasks with the same priority execute in arrival order (FIFO). When named queues are active, `priority` controls ordering within the target queue's heap instead.
+
+**`queue`**: Overrides the decorator-level `queue` setting for this single call. Only effective when the named queue system is active (any `queues=` or `max_size=` argument was passed to `TaskManager`). Tasks routed to a full queue raise `QueueFullError`.
 
 !!! info
     When `priority` is set, the `eager` flag is ignored. The priority queue provides its own non-blocking dispatch path.

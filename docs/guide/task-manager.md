@@ -110,6 +110,43 @@ def generate_report(report_id: int) -> bytes:
 
 See [Process Executor](process-tasks.md) for constraints, `TaskArgumentError`, and the full configuration reference.
 
+## Controlling retry history
+
+When a failed, interrupted, or rejected task is retried via the API or dashboard, `retry_replaces_original` controls what happens to the original record:
+
+```python
+task_manager = TaskManager(
+    snapshot_db="tasks.db",
+    retry_replaces_original=True,  # default
+)
+```
+
+- `True` (default): The original record is deleted from the in-memory store and backend after the new task is dispatched. Only the new run appears in the dashboard and history.
+- `False`: Both records are kept. The original stays in its terminal state and the new task appears alongside it as a separate entry.
+
+This applies to all retry paths: single task retry, bulk retry, and timed bulk retry. It is independent of whether named queues are active.
+
+## Adding named queues
+
+Named queues give different classes of work their own concurrency budgets and backpressure caps. Without them, all tasks share the same global limit.
+
+```python
+from fastapi_taskflow import TaskManager
+from fastapi_taskflow.models import QueueConfig
+
+task_manager = TaskManager(
+    snapshot_db="tasks.db",
+    queues={
+        "email":   QueueConfig(concurrency=30, max_size=500),
+        "reports": QueueConfig(concurrency=4,  max_size=50),
+    },
+)
+```
+
+With named queues active, tasks are routed by setting `queue=` on the decorator or per call. A full queue raises `QueueFullError` when `max_size` is configured. The dashboard shows a Queues tab with live stats per queue.
+
+See [Named Queues](named-queues.md) for the full guide, including `QueueFullError` handling and live config updates.
+
 ## Adding argument encryption
 
 If your tasks receive sensitive data (tokens, PII, credentials), you can encrypt arguments at enqueue time. They are decrypted only inside the executor, just before the function runs:

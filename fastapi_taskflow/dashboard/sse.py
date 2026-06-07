@@ -14,6 +14,7 @@ def _build_sse_state(
     tasks: list,
     include_args: bool = False,
     schedules: list | None = None,
+    queues: list | None = None,
 ) -> str:
     """
     Serialize the full task store as a single SSE ``state`` event.
@@ -64,7 +65,12 @@ def _build_sse_state(
         task_dicts = [t.to_dict() for t in tasks]
 
     payload = json.dumps(
-        {"tasks": task_dicts, "metrics": metrics, "schedules": schedules or []}
+        {
+            "tasks": task_dicts,
+            "metrics": metrics,
+            "schedules": schedules or [],
+            "queues": queues or [],
+        }
     )
     return f"event: state\ndata: {payload}\n\n"
 
@@ -137,6 +143,7 @@ async def _sse_generator(
             tasks,
             include_args=include_args,
             schedules=_get_schedule_entries(task_manager),
+            queues=task_manager.queue_stats(),
         )
 
         while True:
@@ -148,12 +155,13 @@ async def _sse_generator(
                 # the connection without waiting for the browser to disconnect.
                 if msg is None:
                     break
-                # Local mutation always emit a fresh state.
+                # Local mutation always emits a fresh state.
                 tasks = await task_manager.merged_list()
                 yield _build_sse_state(
                     tasks,
                     include_args=include_args,
                     schedules=_get_schedule_entries(task_manager),
+                    queues=task_manager.queue_stats(),
                 )
             except asyncio.TimeoutError:
                 if not has_backend:
@@ -164,6 +172,7 @@ async def _sse_generator(
                         tasks,
                         include_args=include_args,
                         schedules=_get_schedule_entries(task_manager),
+                        queues=task_manager.queue_stats(),
                     )
     except asyncio.CancelledError:
         pass

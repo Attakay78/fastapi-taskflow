@@ -37,6 +37,13 @@ TaskManager(
     max_process_workers: int | None = None,
     process_shutdown_timeout: float = 30.0,
     retention_days: float | None = None,
+    retry_replaces_original: bool = True,
+    queues: dict[str, QueueConfig] | None = None,
+    max_size: int | None = None,
+    instance_url: str | None = None,
+    instance_tasks_prefix: str = "",
+    registry_ttl: int = 90,
+    registry_heartbeat: int = 30,
 )
 ```
 
@@ -77,6 +84,28 @@ TaskManager(
 |-----------|------|---------|-------------|
 | `encrypt_args_key` | `bytes \| str \| None` | `None` | A Fernet key for encrypting task args and kwargs at rest. When set, arguments are encrypted at enqueue time and decrypted only when the executor is about to call the function. Accepts a URL-safe base64 string or raw bytes from `Fernet.generate_key()`. Requires `pip install "fastapi-taskflow[encryption]"`. |
 
+### Retry parameter
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `retry_replaces_original` | `bool` | `True` | When `True`, retrying a task via the API (single retry, bulk retry, or timed retry) removes the original record from the in-memory store and backend after the new task is dispatched. The dashboard and history show only the new run. When `False`, both the original and the new task record are kept. Applies to all retry paths regardless of whether named queues are active. |
+
+### Named queue parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `queues` | `dict[str, QueueConfig] \| None` | `None` | Named queues with individual concurrency and backpressure settings. When provided, tasks are routed through the named queue system. A `"default"` queue is created automatically if not included. |
+| `max_size` | `int \| None` | `None` | Backpressure limit for the implicit `"default"` queue. When the default queue reaches this many tasks pending, `add_task()` raises `QueueFullError`. Activates the named queue system even when `queues` is not provided. |
+
+### Multi-instance parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `instance_url` | `str \| None` | `None` | Public base URL of this instance (for example `"http://10.0.0.1:8000"`). When set alongside a backend that supports `save_metadata`/`load_metadata` (SQLite, Redis, Postgres, MySQL), this instance registers itself so peers can fan out to it. No registration or fan-out occurs when `None`. |
+| `instance_tasks_prefix` | `str` | `""` | URL prefix where the tasks router is mounted on this instance (for example `"/api/tasks"`). Peers append this to `instance_url` when building the fan-out URL. Must match the prefix used when mounting `TaskAdmin` or the router. |
+| `registry_ttl` | `int` | `90` | Seconds before a peer registry entry is considered stale and excluded from fan-out. Should be at least `2 * registry_heartbeat`. |
+| `registry_heartbeat` | `int` | `30` | Seconds between heartbeat writes that keep this instance's registry entry fresh. |
+
 ---
 
 ## Decorators
@@ -95,6 +124,7 @@ Registers a function as a managed background task. The decorated function is ret
     requeue_on_interrupt=False,
     eager=False,
     priority=None,
+    queue=None,
     executor=None,
 )
 def my_task(user_id: int) -> None:
@@ -110,7 +140,8 @@ def my_task(user_id: int) -> None:
 | `name` | `str \| None` | function name | Override the display name in logs and the dashboard. |
 | `requeue_on_interrupt` | `bool` | `False` | When `True` and `requeue_pending=True` on the manager, a task interrupted at shutdown is reset to `PENDING` and re-dispatched on next startup. Only set this for idempotent functions that are safe to restart from scratch. |
 | `eager` | `bool` | `False` | Dispatch via `asyncio.create_task` immediately when `add_task()` is called, before FastAPI sends the response. Per-call `eager` on `add_task()` overrides this value. |
-| `priority` | `int \| None` | `None` | Route through the priority queue instead of Starlette's background task list. Higher values run first. The conventional range is 1 (lowest) to 10 (highest). Per-call `priority` on `add_task()` overrides this value. |
+| `priority` | `int \| None` | `None` | Route through the priority queue instead of Starlette's background task list. Higher values run first. The conventional range is 1 (lowest) to 10 (highest). Per-call `priority` on `add_task()` overrides this value. When named queues are active, controls ordering within the target queue's heap. |
+| `queue` | `str \| None` | `None` | Named queue to route this function into. Requires `queues=` on `TaskManager`. Per-call `queue` on `add_task()` overrides this value. Tasks routed to an unknown queue fall back to `"default"` with a warning. |
 | `executor` | `"async" \| "thread" \| "process" \| None` | `None` | Force a specific executor. `"async"` requires a coroutine. `"thread"` requires a plain function. `"process"` routes to a `ProcessPoolExecutor` and requires a module-level function with picklable arguments. `None` auto-detects from the function signature. |
 
 Raises `ValueError` at decoration time if the function is incompatible with the requested executor (for example, `executor='async'` on a sync function, or `executor='process'` on a lambda or nested function).
@@ -155,6 +186,7 @@ async def cleanup_expired_sessions() -> None:
 | `name` | `str \| None` | function name | Override the display name in logs and the dashboard. |
 | `run_on_startup` | `bool` | `False` | When `True`, fire the task on the first scheduler tick immediately after startup, rather than waiting for the first interval or cron slot. |
 | `timezone` | `str` | `"UTC"` | IANA timezone name used when evaluating `cron` expressions (for example `"America/New_York"`). Ignored when `every` is used. |
+| `queue` | `str \| None` | `None` | Named queue to route each periodic firing into. When the named queue system is active, the task is subject to that queue's concurrency limit and backpressure. Defaults to `"default"`. |
 | `executor` | `"async" \| "thread" \| "process" \| None` | `None` | Force a specific executor for each firing. Same constraints as on `@task()`. `None` auto-detects from the function signature. |
 
 Raises `ValueError` if neither or both of `every` and `cron` are provided, or if `executor` is incompatible with the function. Raises `ImportError` if `cron` is used and `croniter` is not installed.

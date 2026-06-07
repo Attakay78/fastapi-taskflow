@@ -79,8 +79,8 @@ _UPSERT_HISTORY = """
 INSERT INTO task_snapshots
     (task_id, func_name, status, created_at, start_time, end_time,
      duration, retries_used, error, snapshotted_at, args_json, kwargs_json,
-     logs_json, stacktrace, encrypted_payload, source, priority, executor)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+     logs_json, stacktrace, encrypted_payload, source, priority, executor, queue)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (task_id) DO UPDATE SET
     func_name         = EXCLUDED.func_name,
     status            = EXCLUDED.status,
@@ -98,20 +98,22 @@ ON CONFLICT (task_id) DO UPDATE SET
     encrypted_payload = EXCLUDED.encrypted_payload,
     source            = EXCLUDED.source,
     priority          = EXCLUDED.priority,
-    executor          = EXCLUDED.executor
+    executor          = EXCLUDED.executor,
+    queue             = EXCLUDED.queue
 """
 
 _UPSERT_PENDING = """
 INSERT INTO task_pending_requeue
-    (task_id, func_name, created_at, retries_used, args_json, kwargs_json, encrypted_payload)
-VALUES (%s, %s, %s, %s, %s, %s, %s)
+    (task_id, func_name, created_at, retries_used, args_json, kwargs_json, encrypted_payload, queue)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (task_id) DO UPDATE SET
     func_name         = EXCLUDED.func_name,
     created_at        = EXCLUDED.created_at,
     retries_used      = EXCLUDED.retries_used,
     args_json         = EXCLUDED.args_json,
     kwargs_json       = EXCLUDED.kwargs_json,
-    encrypted_payload = EXCLUDED.encrypted_payload
+    encrypted_payload = EXCLUDED.encrypted_payload,
+    queue             = EXCLUDED.queue
 """
 
 
@@ -159,6 +161,8 @@ class PostgresBackend(SnapshotBackend):
         """Create tables and apply any pending column migrations."""
         _migrations = [
             "ALTER TABLE task_snapshots ADD COLUMN IF NOT EXISTS executor TEXT",
+            "ALTER TABLE task_snapshots ADD COLUMN IF NOT EXISTS queue TEXT DEFAULT 'default'",
+            "ALTER TABLE task_pending_requeue ADD COLUMN IF NOT EXISTS queue TEXT DEFAULT 'default'",
         ]
         conn = self._connect()
         try:
@@ -195,6 +199,7 @@ class PostgresBackend(SnapshotBackend):
                 t.source,
                 t.priority,
                 t.executor,
+                t.queue,
             )
             for t in records
         ]
@@ -217,6 +222,7 @@ class PostgresBackend(SnapshotBackend):
                 json.dumps(list(t.args), default=repr),
                 json.dumps(t.kwargs, default=repr),
                 t.encrypted_payload.decode() if t.encrypted_payload else None,
+                t.queue,
             )
             for t in records
         ]
@@ -316,6 +322,23 @@ class PostgresBackend(SnapshotBackend):
         finally:
             conn.close()
 
+    def _delete_records_sync(self, task_ids: list[str]) -> int:
+        """Delete specific records from history by task ID. Returns count deleted."""
+        if not task_ids:
+            return 0
+        placeholders = ",".join(["%s"] * len(task_ids))
+        conn = self._connect()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"DELETE FROM task_snapshots WHERE task_id IN ({placeholders})",
+                        task_ids,
+                    )
+                    return cur.rowcount
+        finally:
+            conn.close()
+
     def _completed_ids_sync(self, task_ids: list[str]) -> set[str]:
         placeholders = ",".join(["%s"] * len(task_ids))
         conn = self._connect()
@@ -383,6 +406,9 @@ class PostgresBackend(SnapshotBackend):
     async def delete_before(self, cutoff: datetime) -> int:
         return await asyncio.to_thread(self._delete_before_sync, cutoff.isoformat())
 
+    async def delete_records(self, task_ids: list[str]) -> int:
+        return await asyncio.to_thread(self._delete_records_sync, task_ids)
+
     async def completed_ids(self, task_ids: list[str]) -> set[str]:
         if not task_ids:
             return set()
@@ -425,6 +451,7 @@ def _row_to_record(d: dict) -> TaskRecord:
         source=d.get("source") or "manual",
         priority=d.get("priority"),
         executor=d.get("executor"),
+        queue=d.get("queue") or "default",
     )
 
 
@@ -443,4 +470,5 @@ def _row_to_pending_record(d: dict) -> TaskRecord:
         args=tuple(json.loads(d["args_json"])) if d.get("args_json") else (),
         kwargs=json.loads(d["kwargs_json"]) if d.get("kwargs_json") else {},
         encrypted_payload=enc.encode() if enc else None,
+        queue=d.get("queue") or "default",
     )

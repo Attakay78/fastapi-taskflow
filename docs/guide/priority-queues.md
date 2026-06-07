@@ -113,6 +113,16 @@ A high-priority task dispatched while the semaphore is full will wait for a slot
 !!! info
     Think of priority and concurrency controls as two separate layers: priority decides the order tasks leave the queue, and `max_concurrent_tasks` decides how many can be executing at any given moment.
 
+## Interaction with named queues
+
+When the named queue system is active (any `queues=` or `max_size=` argument is passed to `TaskManager`), the dedicated priority queue worker is not used. Instead, `priority=` controls the order tasks are dispatched from within each named queue's heap. A higher priority task in the `"email"` queue is dispatched before a lower priority task in the same `"email"` queue.
+
+Priority does not move tasks between queues. A high-priority task in `"reports"` will not be dispatched before any task in `"email"`. Each queue has its own ordered heap and its own concurrency limit.
+
+For applications that need both per-queue concurrency budgets and priority ordering within each queue, use named queues with `priority=` on the decorator or per call.
+
+See [Named Queues](named-queues.md) for the full guide.
+
 ## Dashboard
 
 Priority appears in the task table as a color-coded badge next to the function name.

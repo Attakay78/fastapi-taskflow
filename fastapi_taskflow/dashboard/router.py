@@ -5,7 +5,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from ..auth import verify_token, COOKIE_NAME
-from .helpers import _render_metrics, _render_task_rows
+from .helpers import _render_metrics, _render_queue_cards, _render_task_rows
 from .sse import _sse_generator
 from .template import _dashboard_page, _serialize_registry
 
@@ -86,5 +86,20 @@ def create_dashboard_router(
             raise HTTPException(status_code=401, detail="Unauthorized")
         tasks = await task_manager.merged_list()
         return HTMLResponse(_render_task_rows(tasks))
+
+    @router.get("/queues", response_class=HTMLResponse)
+    def queues_fragment(request: Request) -> HTMLResponse:
+        """Return the rendered queue cards HTML fragment for the dashboard.
+
+        Called by the client-side JS when the Queues tab is opened or when
+        the SSE stream delivers a change notification. Returns the full
+        cards section so the browser can replace the panel content in-place.
+        """
+        if not _check_cookie(request):
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        stats = task_manager.queue_stats()
+        return HTMLResponse(_render_queue_cards(stats, prefix))
 
     return router

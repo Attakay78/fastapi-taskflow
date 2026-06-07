@@ -132,6 +132,7 @@ class TaskStore:
         source: str = "manual",
         priority: Optional[int] = None,
         executor: Optional[str] = None,
+        queue: str = "default",
     ) -> TaskRecord:
         """Create a new ``PENDING`` record and add it to the store.
 
@@ -153,6 +154,8 @@ class TaskStore:
             executor: Effective executor name (``"async"``, ``"thread"``, or
                 ``"process"``). Stored on the record so the dashboard can
                 display it without re-resolving config.
+            queue: Name of the queue this task was routed to. Defaults to
+                ``"default"`` for tasks enqueued without a named queue.
         """
         record = TaskRecord(
             task_id=task_id,
@@ -166,6 +169,7 @@ class TaskStore:
             source=source,
             priority=priority,
             executor=cast(Optional[Literal["async", "thread", "process"]], executor),
+            queue=queue,
         )
         with self._lock:
             self._tasks[task_id] = record
@@ -236,6 +240,17 @@ class TaskStore:
         with self._lock:
             return list(self._tasks.values())
 
+    def delete(self, task_id: str) -> bool:
+        """Remove a single record from the in-memory store by its task ID.
+
+        Returns True if the record was present and removed, False if not found.
+        """
+        with self._lock:
+            if task_id in self._tasks:
+                del self._tasks[task_id]
+                return True
+            return False
+
     def delete_completed_before(self, cutoff: datetime) -> int:
         """Remove terminal records from the store whose end_time is before *cutoff*.
 
@@ -250,6 +265,7 @@ class TaskStore:
             TaskStatus.FAILED,
             TaskStatus.INTERRUPTED,
             TaskStatus.CANCELLED,
+            TaskStatus.REJECTED,
         }
         _cutoff = cutoff.replace(tzinfo=None) if cutoff.tzinfo is not None else cutoff
         to_remove = []
