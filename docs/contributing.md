@@ -20,19 +20,71 @@ For smaller changes like typo fixes, documentation improvements, or obvious bug 
 
 ### Local setup
 
+The project uses [uv](https://docs.astral.sh/uv/) for dependency management.
+
 ```bash
 git clone https://github.com/Attakay78/fastapi-taskflow
 cd fastapi-taskflow
-pip install -e ".[dev]"
+uv sync
 ```
 
-### Running tests
+PRs should target the `develop` branch, not `main`.
+
+### Checks to run before opening a PR
+
+Run all of the following and make sure they pass cleanly.
+
+**Lint**
 
 ```bash
-pytest
+uv run ruff check .
 ```
 
-All tests must pass before a PR will be reviewed. If you are adding a feature, include tests that cover the new behaviour.
+**Format**
+
+```bash
+uv run ruff format --check .
+```
+
+To auto-fix formatting:
+
+```bash
+uv run ruff format .
+```
+
+**Type checking**
+
+```bash
+uv run mypy fastapi_taskflow
+```
+
+**Tests**
+
+```bash
+uv run pytest
+```
+
+All tests must pass. If you are adding a feature, include tests that cover the new behaviour.
+
+### Docs and README
+
+If your change affects user-facing behaviour, update the relevant page under `docs/` or `README.md` before opening the PR.
+
+To preview the docs site locally:
+
+```bash
+uv run mkdocs serve
+```
+
+Then open [http://127.0.0.1:8000/fastapi-taskflow](http://127.0.0.1:8000/fastapi-taskflow) in your browser. The server reloads automatically as you edit files under `docs/` or `mkdocs.yml`.
+
+To do a one-off build without serving:
+
+```bash
+uv run mkdocs build
+```
+
+The output goes to `site/`. That directory is gitignored and does not need to be committed.
 
 ### Code style
 
