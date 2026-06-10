@@ -10,7 +10,7 @@ Covers:
   propagation, picklability validation, and shutdown.
 * LazyProcessExecutor: pool creation is deferred until first dispatch.
 * TaskManager: new constructor parameters, executor registry, _resolve_executor.
-* ManagedBackgroundTasks: eager-plus-process bypass, validate_args at enqueue.
+* ManagedBackgroundTasks: eager-plus-process, validate_args at enqueue.
 * execute_task: process executor paths produce correct TaskRecord transitions.
 """
 
@@ -820,26 +820,28 @@ def test_add_task_accepts_picklable_args_for_process_task():
 
 
 # ---------------------------------------------------------------------------
-# ManagedBackgroundTasks: eager + process bypass
+# ManagedBackgroundTasks: eager + process executor
 # ---------------------------------------------------------------------------
 
 
-async def test_add_task_eager_process_logs_warning_and_falls_back(caplog):
+async def test_add_task_eager_process_no_warning(caplog):
     tm = TaskManager()
     proc_task = tm.task(executor="process", eager=True)(_proc_double)
     managed = ManagedBackgroundTasks(tm)
     with caplog.at_level(logging.WARNING, logger="fastapi_taskflow.wrapper"):
         task_id = managed.add_task(proc_task, 1)
 
-    assert any("eager" in r.message and "process" in r.message for r in caplog.records)
+    assert not any(
+        "eager" in r.message and "process" in r.message for r in caplog.records
+    )
     assert task_id is not None
 
 
-async def test_add_task_eager_process_falls_back_to_thread_executor():
+async def test_add_task_eager_process_uses_process_executor():
     tm = TaskManager()
     dispatched_via = []
 
-    original_dispatch = ThreadExecutor.dispatch
+    original_dispatch = ProcessExecutor.dispatch
 
     async def tracking_dispatch(
         self, func, args, kwargs, context, exec_ctx, sink, loop
@@ -849,14 +851,17 @@ async def test_add_task_eager_process_falls_back_to_thread_executor():
             self, func, args, kwargs, context, exec_ctx, sink, loop
         )
 
-    ThreadExecutor.dispatch = tracking_dispatch
+    ProcessExecutor.dispatch = tracking_dispatch
 
     try:
         proc_task = tm.task(executor="process", eager=True)(_proc_double)
         managed = ManagedBackgroundTasks(tm)
         managed.add_task(proc_task, 1)
+        await asyncio.sleep(0.5)
     finally:
-        ThreadExecutor.dispatch = original_dispatch
+        ProcessExecutor.dispatch = original_dispatch
+
+    assert dispatched_via == ["process"]
 
 
 # ---------------------------------------------------------------------------

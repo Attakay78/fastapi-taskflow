@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.10.0
+
+Improves connection handling across all three database backends.
+
+### Backend improvements
+
+- `PostgresBackend` now uses a `psycopg2.ThreadedConnectionPool` backed by a dedicated thread pool. Connections are pooled and reused across operations. An existing pool can be passed in via the `pool` parameter for applications that already manage their own `psycopg2` pool. `min_conn`, `max_conn`, and `max_workers` are configurable on the constructor.
+- `MySQLBackend` now keeps one persistent connection per executor thread. Connections dropped by MySQL's `wait_timeout` are detected and reconnected automatically before each operation.
+- `SqliteBackend` now uses a dedicated thread pool with one persistent connection per thread, consistent with the other backends.
+- All three backends use a dedicated `ThreadPoolExecutor` instead of the shared asyncio default thread pool, so backend I/O does not compete with sync task execution.
+
+### Bug fixes
+
+- `eager=True` combined with `executor='process'` now works correctly. Previously the process executor was bypassed and the task fell back to the async or thread executor with a warning. The process pool is now used as expected: the task is dispatched immediately via `asyncio.create_task`, submits work to the process pool inside the coroutine, and awaits the result.
+
+---
+
 ## v0.9.0
 
 Adds named queues with independent concurrency caps, backpressure limits, and live config updates.

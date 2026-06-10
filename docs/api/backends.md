@@ -102,6 +102,11 @@ task_manager = TaskManager(snapshot_backend=SqliteBackend("tasks.db"))
 
 You can also use the shorthand `snapshot_db="tasks.db"` on `TaskManager`, which creates a `SqliteBackend` automatically.
 
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `db_path` | `str` | `"tasks.db"` | Path to the SQLite file. Created automatically if absent. |
+| `max_workers` | `int` | `4` | Thread pool size. Each thread holds one persistent connection. |
+
 ### Supported features
 
 | Feature | Supported |
@@ -181,7 +186,7 @@ backend = RedisBackend(
 
 ## PostgresBackend
 
-`PostgresBackend` stores history in a `task_snapshots` table and pending tasks in a `task_pending_requeue` table. Tables and indexes are created automatically on first connection. Uses `psycopg2` with `asyncio.to_thread` for non-blocking async operation.
+`PostgresBackend` stores history in a `task_snapshots` table and pending tasks in a `task_pending_requeue` table. Tables are created automatically on first connection. Uses a `psycopg2.ThreadedConnectionPool` with a dedicated thread pool so connections are pooled and reused across operations.
 
 ```bash
 pip install "fastapi-taskflow[postgres]"
@@ -195,7 +200,11 @@ backend = PostgresBackend("postgresql://user:pass@localhost:5432/mydb")
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `url` | `str` | required | PostgreSQL connection string in `postgresql://` format. |
+| `url` | `str \| None` | `None` | PostgreSQL connection string in `postgresql://` format. Either `url` or `pool` must be provided. |
+| `pool` | `ThreadedConnectionPool \| None` | `None` | An existing `psycopg2.ThreadedConnectionPool` to reuse. When provided, `close()` will not shut the pool down. |
+| `min_conn` | `int` | `1` | Minimum connections kept open in the pool. Ignored when `pool` is provided. |
+| `max_conn` | `int` | `5` | Maximum connections the pool will open. Ignored when `pool` is provided. |
+| `max_workers` | `int` | `4` | Thread pool size for offloading sync operations. |
 
 ### Supported features
 
@@ -203,15 +212,15 @@ backend = PostgresBackend("postgresql://user:pass@localhost:5432/mydb")
 |---------|-----------|
 | Task history | Yes |
 | Pending requeue | Yes |
-| Idempotency keys | No |
-| Distributed schedule locking | No (use `RedisBackend` for multi-instance) |
+| Idempotency keys | Yes |
+| Distributed schedule locking | Yes |
 | Retention pruning (`delete_before`) | Yes |
 
 ---
 
 ## MySQLBackend
 
-`MySQLBackend` stores history in a `task_snapshots` table and pending tasks in a `task_pending_requeue` table. Tables are created automatically on first connection. Uses `PyMySQL` with `asyncio.to_thread` for non-blocking async operation. Compatible with MariaDB.
+`MySQLBackend` stores history in a `task_snapshots` table and pending tasks in a `task_pending_requeue` table. Tables are created automatically on first connection. Keeps one persistent connection per executor thread with automatic reconnection for connections dropped by MySQL's `wait_timeout`. Compatible with MariaDB.
 
 ```bash
 pip install "fastapi-taskflow[mysql]"
@@ -225,11 +234,8 @@ backend = MySQLBackend("mysql://root:secret@localhost:3306/mydb")
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `host` | `str` | required | MySQL server hostname. |
-| `port` | `int` | `3306` | MySQL server port. |
-| `user` | `str` | required | Database username. |
-| `password` | `str` | required | Database password. |
-| `database` | `str` | required | Name of the database to connect to. |
+| `url` | `str` | required | Connection string in `mysql://user:pass@host:port/dbname` format. Query parameters are forwarded to `pymysql.connect()`. Use `?ssl-mode=REQUIRED` to enable SSL. |
+| `max_workers` | `int` | `4` | Thread pool size. Each thread holds one persistent connection. |
 
 ### Supported features
 
@@ -237,6 +243,6 @@ backend = MySQLBackend("mysql://root:secret@localhost:3306/mydb")
 |---------|-----------|
 | Task history | Yes |
 | Pending requeue | Yes |
-| Idempotency keys | No |
-| Distributed schedule locking | No (use `RedisBackend` for multi-instance) |
+| Idempotency keys | Yes |
+| Distributed schedule locking | Yes |
 | Retention pruning (`delete_before`) | Yes |

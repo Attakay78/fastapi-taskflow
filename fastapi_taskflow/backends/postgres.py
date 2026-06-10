@@ -17,11 +17,11 @@ Usage::
 
 from __future__ import annotations
 
-import asyncio
 import json
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
-from .base import SnapshotBackend
+from .base import ThreadedSnapshotBackend
 from ..models import TaskRecord, TaskStatus
 
 
@@ -75,6 +75,13 @@ CREATE TABLE IF NOT EXISTS task_schedule_locks (
 )
 """
 
+_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_snap_status ON task_snapshots(status)",
+    "CREATE INDEX IF NOT EXISTS idx_snap_end_status ON task_snapshots(end_time, status)",
+    "CREATE INDEX IF NOT EXISTS idx_snap_snapshotted ON task_snapshots(snapshotted_at)",
+    "CREATE INDEX IF NOT EXISTS idx_snap_func_name ON task_snapshots(func_name)",
+]
+
 _UPSERT_HISTORY = """
 INSERT INTO task_snapshots
     (task_id, func_name, status, created_at, start_time, end_time,
@@ -117,15 +124,22 @@ ON CONFLICT (task_id) DO UPDATE SET
 """
 
 
-class PostgresBackend(SnapshotBackend):
+class PostgresBackend(ThreadedSnapshotBackend):
     """Persist task snapshots to a PostgreSQL database.
 
-    Uses ``psycopg2`` with ``asyncio.to_thread`` so the async interface
-    stays non-blocking without pulling in an additional async driver.
+    Uses ``psycopg2`` with a ``ThreadedConnectionPool`` and a dedicated
+    ``ThreadPoolExecutor`` so backend I/O does not compete with the
+    application's default asyncio executor.
 
     Args:
         url: PostgreSQL connection string, e.g.
             ``"postgresql://user:pass@localhost:5432/mydb"``.
+            Either ``url`` or ``pool`` must be provided.
+        pool: An existing ``psycopg2.pool.ThreadedConnectionPool`` to reuse.
+            When provided, ``close()`` will not shut the pool down.
+        min_conn: Minimum connections kept open in the pool (default 1).
+        max_conn: Maximum connections the pool will open (default 5).
+        max_workers: Thread pool size for offloading sync operations (default 4).
 
     Example::
 
@@ -139,23 +153,48 @@ class PostgresBackend(SnapshotBackend):
         )
     """
 
-    def __init__(self, url: str) -> None:
-        self._url = url
+    def __init__(
+        self,
+        url: str | None = None,
+        *,
+        pool=None,
+        min_conn: int = 1,
+        max_conn: int = 5,
+        max_workers: int = 4,
+    ) -> None:
+        super().__init__(max_workers=max_workers, thread_name_prefix="taskflow-pg")
+        if pool is not None:
+            self._pool = pool
+            self._owns_pool = False
+        elif url is not None:
+            self._pool = self._create_pool(url, min_conn, max_conn)
+            self._owns_pool = True
+        else:
+            raise ValueError("Either url or pool must be provided")
         self._init_db()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _connect(self):
+    @staticmethod
+    def _create_pool(url: str, min_conn: int, max_conn: int):
         try:
-            import psycopg2  # type: ignore[import-untyped]
+            import psycopg2.pool  # type: ignore[import-untyped]
         except ImportError as exc:
             raise ImportError(
                 "PostgresBackend requires psycopg2. "
                 "Install it with: pip install 'fastapi-taskflow[postgres]'"
             ) from exc
-        return psycopg2.connect(self._url)
+        return psycopg2.pool.ThreadedConnectionPool(min_conn, max_conn, url)
+
+    @contextmanager
+    def _get_conn(self):
+        conn = self._pool.getconn()
+        try:
+            yield conn
+        finally:
+            self._pool.putconn(conn)
 
     def _init_db(self) -> None:
         """Create tables and apply any pending column migrations."""
@@ -164,8 +203,7 @@ class PostgresBackend(SnapshotBackend):
             "ALTER TABLE task_snapshots ADD COLUMN IF NOT EXISTS queue TEXT DEFAULT 'default'",
             "ALTER TABLE task_pending_requeue ADD COLUMN IF NOT EXISTS queue TEXT DEFAULT 'default'",
         ]
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute(_CREATE_HISTORY)
@@ -174,8 +212,8 @@ class PostgresBackend(SnapshotBackend):
                     cur.execute(_CREATE_SCHEDULE_LOCKS)
                     for migration in _migrations:
                         cur.execute(migration)
-        finally:
-            conn.close()
+                    for index in _INDEXES:
+                        cur.execute(index)
 
     def _save_sync(self, records: list[TaskRecord]) -> int:
         now = datetime.utcnow().isoformat()
@@ -203,13 +241,10 @@ class PostgresBackend(SnapshotBackend):
             )
             for t in records
         ]
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn:
                 with conn.cursor() as cur:
                     cur.executemany(_UPSERT_HISTORY, rows)
-        finally:
-            conn.close()
         return len(records)
 
     def _save_pending_sync(self, records: list[TaskRecord]) -> int:
@@ -226,51 +261,38 @@ class PostgresBackend(SnapshotBackend):
             )
             for t in records
         ]
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute("DELETE FROM task_pending_requeue")
                     if rows:
                         cur.executemany(_UPSERT_PENDING, rows)
-        finally:
-            conn.close()
         return len(records)
 
     def _load_sync(self) -> list[TaskRecord]:
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM task_snapshots")
                 cols = [desc[0] for desc in cur.description]
                 rows = [dict(zip(cols, row)) for row in cur.fetchall()]
-        finally:
-            conn.close()
         return [_row_to_record(d) for d in rows]
 
     def _load_pending_sync(self) -> list[TaskRecord]:
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM task_pending_requeue")
                 cols = [desc[0] for desc in cur.description]
                 rows = [dict(zip(cols, row)) for row in cur.fetchall()]
-        finally:
-            conn.close()
         return [_row_to_pending_record(d) for d in rows]
 
     def _clear_pending_sync(self) -> None:
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute("DELETE FROM task_pending_requeue")
-        finally:
-            conn.close()
 
     def _claim_pending_sync(self, task_id: str) -> bool:
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -278,25 +300,19 @@ class PostgresBackend(SnapshotBackend):
                         (task_id,),
                     )
                     return cur.rowcount == 1
-        finally:
-            conn.close()
 
     def _check_idempotency_key_sync(self, key: str) -> str | None:
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT task_id FROM task_idempotency_keys WHERE idem_key = %s",
                     (key,),
                 )
                 row = cur.fetchone()
-            return row[0] if row else None
-        finally:
-            conn.close()
+        return row[0] if row else None
 
     def _record_idempotency_key_sync(self, key: str, task_id: str) -> None:
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -304,12 +320,9 @@ class PostgresBackend(SnapshotBackend):
                         " VALUES (%s, %s, %s) ON CONFLICT (idem_key) DO NOTHING",
                         (key, task_id, datetime.utcnow().isoformat()),
                     )
-        finally:
-            conn.close()
 
     def _delete_before_sync(self, cutoff: str) -> int:
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -319,16 +332,12 @@ class PostgresBackend(SnapshotBackend):
                         (cutoff,),
                     )
                     return cur.rowcount
-        finally:
-            conn.close()
 
     def _delete_records_sync(self, task_ids: list[str]) -> int:
-        """Delete specific records from history by task ID. Returns count deleted."""
         if not task_ids:
             return 0
         placeholders = ",".join(["%s"] * len(task_ids))
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -336,13 +345,10 @@ class PostgresBackend(SnapshotBackend):
                         task_ids,
                     )
                     return cur.rowcount
-        finally:
-            conn.close()
 
     def _completed_ids_sync(self, task_ids: list[str]) -> set[str]:
         placeholders = ",".join(["%s"] * len(task_ids))
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"SELECT task_id FROM task_snapshots"
@@ -350,15 +356,12 @@ class PostgresBackend(SnapshotBackend):
                     task_ids,
                 )
                 return {row[0] for row in cur.fetchall()}
-        finally:
-            conn.close()
 
     def _acquire_schedule_lock_sync(self, key: str, ttl: int) -> bool:
         now = datetime.utcnow()
         expires_at = (now + timedelta(seconds=ttl)).isoformat()
         now_iso = now.isoformat()
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -372,53 +375,11 @@ class PostgresBackend(SnapshotBackend):
                         (key, expires_at),
                     )
                     return cur.rowcount == 1
-        finally:
-            conn.close()
-
-    # ------------------------------------------------------------------
-    # SnapshotBackend interface
-    # ------------------------------------------------------------------
-
-    async def save(self, records: list[TaskRecord]) -> int:
-        return await asyncio.to_thread(self._save_sync, records)
-
-    async def load(self) -> list[TaskRecord]:
-        return await asyncio.to_thread(self._load_sync)
-
-    async def save_pending(self, records: list[TaskRecord]) -> int:
-        return await asyncio.to_thread(self._save_pending_sync, records)
-
-    async def load_pending(self) -> list[TaskRecord]:
-        return await asyncio.to_thread(self._load_pending_sync)
-
-    async def clear_pending(self) -> None:
-        await asyncio.to_thread(self._clear_pending_sync)
-
-    async def claim_pending(self, task_id: str) -> bool:
-        return await asyncio.to_thread(self._claim_pending_sync, task_id)
-
-    async def check_idempotency_key(self, key: str) -> str | None:
-        return await asyncio.to_thread(self._check_idempotency_key_sync, key)
-
-    async def record_idempotency_key(self, key: str, task_id: str) -> None:
-        await asyncio.to_thread(self._record_idempotency_key_sync, key, task_id)
-
-    async def delete_before(self, cutoff: datetime) -> int:
-        return await asyncio.to_thread(self._delete_before_sync, cutoff.isoformat())
-
-    async def delete_records(self, task_ids: list[str]) -> int:
-        return await asyncio.to_thread(self._delete_records_sync, task_ids)
-
-    async def completed_ids(self, task_ids: list[str]) -> set[str]:
-        if not task_ids:
-            return set()
-        return await asyncio.to_thread(self._completed_ids_sync, task_ids)
-
-    async def acquire_schedule_lock(self, key: str, ttl: int) -> bool:
-        return await asyncio.to_thread(self._acquire_schedule_lock_sync, key, ttl)
 
     async def close(self) -> None:
-        pass  # connections are opened and closed per operation
+        self._executor.shutdown(wait=False)
+        if self._owns_pool:
+            self._pool.closeall()
 
 
 # ------------------------------------------------------------------

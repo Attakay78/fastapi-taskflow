@@ -38,10 +38,6 @@ The following constraints apply to ``executor='process'`` tasks:
   before being pickled and sent to the worker. The IPC transport is a local
   pipe; there is no network exposure.
 
-* **Eager dispatch bypass.** When ``eager=True`` is also set, process dispatch
-  is bypassed and the task runs in-process with a logged warning. Eager mode
-  is incompatible with the process pool, which is not started until needed.
-
 * **No real-time log streaming.** Log records emitted by
   :func:`~fastapi_taskflow.task_logging.task_log` inside the worker are
   collected and delivered to the parent after the function returns. Dashboard

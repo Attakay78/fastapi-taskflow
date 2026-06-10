@@ -1,6 +1,6 @@
 # Eager Dispatch
 
-This page explains what eager dispatch does, when it actually makes a difference, and when you do not need it at all.
+This page explains what eager dispatch does, what it bypasses, and when it actually makes a difference.
 
 ## The default: tasks start after the response
 
@@ -17,7 +17,7 @@ Setting `eager=True` on a task makes `add_task()` call `asyncio.create_task()` i
 The task starts running concurrently with the rest of the route handler and with response serialisation. It does not wait for the response to be sent.
 
 !!! note
-    The task is still tracked, persisted, retried, and visible in the dashboard exactly the same as a deferred task. The only thing eager dispatch changes is *when* the task starts.
+    The task is still tracked, persisted, retried, and visible in the dashboard exactly the same as a deferred task. The only thing eager dispatch changes is *when* the task starts and how it is routed.
 
 ## When eager dispatch matters
 
@@ -40,6 +40,24 @@ Without eager dispatch, all 20 notifications run sequentially. With `eager=True`
 
 !!! info
     If your tasks come from different HTTP requests rather than a single handler loop, you do not need eager dispatch. Each request's tasks start after that response is sent, and multiple requests are handled concurrently by FastAPI naturally.
+
+## What eager bypasses
+
+Eager dispatch routes the task directly to `asyncio.create_task()` and skips every other routing path. This has consequences worth understanding.
+
+### Named queues
+
+Eager tasks skip named queues entirely. The concurrency cap, backpressure limit, and `QueueFullError` on the target queue have no effect. The task starts immediately regardless of how busy the queue is or whether `max_size` has been reached.
+
+This means `eager=True` on a task that belongs to a throttled queue silently removes it from that throttle. If the queue exists to protect a downstream service from overload, eager dispatch defeats that protection.
+
+### Priority routing
+
+`eager` takes precedence over `priority`. When both are set, the task dispatches immediately via `asyncio.create_task()` and does not enter the priority worker. The priority value is stored on the task record but has no effect on execution order.
+
+### Standard deferred execution
+
+Eager tasks do not wait for the response to be sent. They start while the route handler is still running. See the warning below.
 
 ## Setting eager on the decorator
 
@@ -98,10 +116,6 @@ When `eager=True` is resolved for a given `add_task()` call:
 
 Eager dispatch works with sync functions too. The function is still wrapped in `asyncio.to_thread` (or submitted to the dedicated sync thread pool when `max_sync_threads` is configured), so it does not block the event loop. The coroutine wrapper is what gets dispatched via `asyncio.create_task`.
 
-## Interaction with priority
-
-When a task has a `priority` value set, it is always routed through the priority queue regardless of the `eager` setting. The priority worker dispatches via `asyncio.create_task` itself, so the practical outcome is similar, but `eager` is ignored when `priority` is present.
-
 !!! warning
     Do not use eager dispatch for tasks that depend on request teardown completing first, such as tasks that close database sessions used by the same request handler. In those cases, keep `eager=False` (the default) so the task starts only after the response lifecycle is fully complete.
 
@@ -125,7 +139,7 @@ async def send_push(user_id: int, body: str) -> None:
 
 @task_manager.task()
 async def log_event(event: str) -> None:
-    # Deferred — starts after the response is sent.
+    # Deferred: starts after the response is sent.
     await analytics.record(event)
 
 

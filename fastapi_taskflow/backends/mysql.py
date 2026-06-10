@@ -17,12 +17,13 @@ Usage::
 
 from __future__ import annotations
 
-import asyncio
 import json
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
-from .base import SnapshotBackend
+from .base import ThreadedSnapshotBackend
 from ..models import TaskRecord, TaskStatus
 
 
@@ -45,7 +46,8 @@ CREATE TABLE IF NOT EXISTS task_snapshots (
     encrypted_payload TEXT,
     source            VARCHAR(32)      DEFAULT 'manual',
     priority          INT,
-    executor          VARCHAR(32)
+    executor          VARCHAR(32),
+    queue             VARCHAR(128)     DEFAULT 'default'
 )
 """
 
@@ -75,6 +77,13 @@ CREATE TABLE IF NOT EXISTS task_schedule_locks (
     expires_at TEXT         NOT NULL
 )
 """
+
+_INDEXES = [
+    "CREATE INDEX idx_snap_status ON task_snapshots(status)",
+    "CREATE INDEX idx_snap_end_status ON task_snapshots(end_time(32), status)",
+    "CREATE INDEX idx_snap_snapshotted ON task_snapshots(snapshotted_at(32))",
+    "CREATE INDEX idx_snap_func_name ON task_snapshots(func_name(191))",
+]
 
 _UPSERT_HISTORY = """
 INSERT INTO task_snapshots
@@ -118,12 +127,15 @@ ON DUPLICATE KEY UPDATE
 """
 
 
-class MySQLBackend(SnapshotBackend):
+class MySQLBackend(ThreadedSnapshotBackend):
     """Persist task snapshots to a MySQL or MariaDB database.
 
-    Uses ``PyMySQL`` with ``asyncio.to_thread`` so the async interface
-    stays non-blocking without pulling in an additional async driver.
-    Tables are created automatically on first connection.
+    Uses ``PyMySQL`` with one persistent connection per executor thread and a
+    dedicated ``ThreadPoolExecutor`` so backend I/O does not compete with the
+    application's default asyncio executor.  Connections are created lazily on
+    first use per thread and reused for the executor's lifetime.  A ``ping``
+    on each borrow transparently reconnects sockets dropped by MySQL's
+    ``wait_timeout``.
 
     Args:
         url: Connection string in the form ``mysql://user:pass@host:port/dbname``.
@@ -135,6 +147,9 @@ class MySQLBackend(SnapshotBackend):
             and mapped to PyMySQL's ``ssl={}`` to enable SSL without requiring
             a certificate. Use PyMySQL spellings (underscores) for all other
             options.
+        max_workers: Thread pool size for offloading sync operations (default 4).
+            Each thread holds one persistent connection, so this also caps the
+            number of open MySQL connections.
 
     Example::
 
@@ -153,9 +168,22 @@ class MySQLBackend(SnapshotBackend):
         )
     """
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, *, max_workers: int = 4) -> None:
+        super().__init__(max_workers=max_workers, thread_name_prefix="taskflow-mysql")
+        self._connect_kwargs = self._parse_url(url)
+        self._local = threading.local()
+        self._all_conns: list = []
+        self._conns_lock = threading.Lock()
+        self._init_db()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_url(url: str) -> dict:
         parsed = urlparse(url)
-        self._connect_kwargs: dict = dict(
+        connect_kwargs: dict = dict(
             host=parsed.hostname or "localhost",
             port=parsed.port or 3306,
             user=parsed.username or "root",
@@ -166,10 +194,8 @@ class MySQLBackend(SnapshotBackend):
             for key, values in parse_qs(parsed.query, keep_blank_values=True).items():
                 val = values[0] if len(values) == 1 else values
                 if key == "ssl-mode":
-                    # mysql CLI uses ssl-mode=REQUIRED; PyMySQL uses ssl={}.
-                    # Any value other than DISABLED enables SSL.
                     if isinstance(val, str) and val.upper() != "DISABLED":
-                        self._connect_kwargs.setdefault("ssl", {})
+                        connect_kwargs.setdefault("ssl", {})
                 elif "-" in key:
                     raise ValueError(
                         f"MySQLBackend: unsupported query parameter '{key}'. "
@@ -177,14 +203,10 @@ class MySQLBackend(SnapshotBackend):
                         f"Use '{key.replace('-', '_')}' instead."
                     )
                 else:
-                    self._connect_kwargs[key] = val
-        self._init_db()
+                    connect_kwargs[key] = val
+        return connect_kwargs
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _connect(self):
+    def _new_conn(self):
         try:
             import pymysql  # type: ignore[import-untyped]
             import pymysql.cursors  # type: ignore[import-untyped]
@@ -193,11 +215,34 @@ class MySQLBackend(SnapshotBackend):
                 "MySQLBackend requires PyMySQL. "
                 "Install it with: pip install 'fastapi-taskflow[mysql]'"
             ) from exc
-        return pymysql.connect(
+        conn = pymysql.connect(
             cursorclass=pymysql.cursors.DictCursor,
             autocommit=False,
             **self._connect_kwargs,
         )
+        with self._conns_lock:
+            self._all_conns.append(conn)
+        return conn
+
+    @contextmanager
+    def _get_conn(self):
+        if not hasattr(self._local, "conn") or self._local.conn is None:
+            self._local.conn = self._new_conn()
+        try:
+            self._local.conn.ping(reconnect=True)
+        except Exception:
+            self._local.conn = self._new_conn()
+        yield self._local.conn
+
+    @contextmanager
+    def _transaction(self):
+        with self._get_conn() as conn:
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     def _init_db(self) -> None:
         """Create tables and apply any pending column migrations."""
@@ -206,8 +251,7 @@ class MySQLBackend(SnapshotBackend):
             "ALTER TABLE task_snapshots ADD COLUMN queue VARCHAR(128) DEFAULT 'default'",
             "ALTER TABLE task_pending_requeue ADD COLUMN queue VARCHAR(128) DEFAULT 'default'",
         ]
-        conn = self._connect()
-        try:
+        with self._transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute(_CREATE_HISTORY)
                 cur.execute(_CREATE_PENDING)
@@ -218,9 +262,11 @@ class MySQLBackend(SnapshotBackend):
                         cur.execute(migration)
                     except Exception:
                         pass  # column already exists
-            conn.commit()
-        finally:
-            conn.close()
+                for index in _INDEXES:
+                    try:
+                        cur.execute(index)
+                    except Exception:
+                        pass  # index already exists
 
     def _save_sync(self, records: list[TaskRecord]) -> int:
         now = datetime.utcnow().isoformat()
@@ -248,13 +294,9 @@ class MySQLBackend(SnapshotBackend):
             )
             for t in records
         ]
-        conn = self._connect()
-        try:
+        with self._transaction() as conn:
             with conn.cursor() as cur:
                 cur.executemany(_UPSERT_HISTORY, rows)
-            conn.commit()
-        finally:
-            conn.close()
         return len(records)
 
     def _save_pending_sync(self, records: list[TaskRecord]) -> int:
@@ -271,89 +313,63 @@ class MySQLBackend(SnapshotBackend):
             )
             for t in records
         ]
-        conn = self._connect()
-        try:
+        with self._transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM task_pending_requeue")
                 if rows:
                     cur.executemany(_UPSERT_PENDING, rows)
-            conn.commit()
-        finally:
-            conn.close()
         return len(records)
 
     def _load_sync(self) -> list[TaskRecord]:
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM task_snapshots")
                 rows = cur.fetchall()
-        finally:
-            conn.close()
         return [_row_to_record(d) for d in rows]
 
     def _load_pending_sync(self) -> list[TaskRecord]:
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM task_pending_requeue")
                 rows = cur.fetchall()
-        finally:
-            conn.close()
         return [_row_to_pending_record(d) for d in rows]
 
     def _clear_pending_sync(self) -> None:
-        conn = self._connect()
-        try:
+        with self._transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM task_pending_requeue")
-            conn.commit()
-        finally:
-            conn.close()
 
     def _claim_pending_sync(self, task_id: str) -> bool:
-        conn = self._connect()
-        try:
+        with self._transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "DELETE FROM task_pending_requeue WHERE task_id = %s",
                     (task_id,),
                 )
                 deleted = cur.rowcount
-            conn.commit()
-            return deleted == 1
-        finally:
-            conn.close()
+        return deleted == 1
 
     def _check_idempotency_key_sync(self, key: str) -> str | None:
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT task_id FROM task_idempotency_keys WHERE idem_key = %s",
                     (key,),
                 )
                 row = cur.fetchone()
-            return row["task_id"] if row else None
-        finally:
-            conn.close()
+        return row["task_id"] if row else None
 
     def _record_idempotency_key_sync(self, key: str, task_id: str) -> None:
-        conn = self._connect()
-        try:
+        with self._transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT IGNORE INTO task_idempotency_keys (idem_key, task_id, created_at)"
                     " VALUES (%s, %s, %s)",
                     (key, task_id, datetime.utcnow().isoformat()),
                 )
-            conn.commit()
-        finally:
-            conn.close()
 
     def _delete_before_sync(self, cutoff: str) -> int:
-        conn = self._connect()
-        try:
+        with self._transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "DELETE FROM task_snapshots"
@@ -362,33 +378,24 @@ class MySQLBackend(SnapshotBackend):
                     (cutoff,),
                 )
                 deleted = cur.rowcount
-            conn.commit()
-            return deleted
-        finally:
-            conn.close()
+        return deleted
 
     def _delete_records_sync(self, task_ids: list[str]) -> int:
-        """Delete specific records from history by task ID. Returns count deleted."""
         if not task_ids:
             return 0
         placeholders = ",".join(["%s"] * len(task_ids))
-        conn = self._connect()
-        try:
+        with self._transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"DELETE FROM task_snapshots WHERE task_id IN ({placeholders})",
                     task_ids,
                 )
                 deleted = cur.rowcount
-            conn.commit()
-            return deleted
-        finally:
-            conn.close()
+        return deleted
 
     def _completed_ids_sync(self, task_ids: list[str]) -> set[str]:
         placeholders = ",".join(["%s"] * len(task_ids))
-        conn = self._connect()
-        try:
+        with self._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"SELECT task_id FROM task_snapshots"
@@ -396,15 +403,12 @@ class MySQLBackend(SnapshotBackend):
                     task_ids,
                 )
                 return {row["task_id"] for row in cur.fetchall()}
-        finally:
-            conn.close()
 
     def _acquire_schedule_lock_sync(self, key: str, ttl: int) -> bool:
         now = datetime.utcnow()
         expires_at = (now + timedelta(seconds=ttl)).isoformat()
         now_iso = now.isoformat()
-        conn = self._connect()
-        try:
+        with self._transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "DELETE FROM task_schedule_locks"
@@ -417,55 +421,17 @@ class MySQLBackend(SnapshotBackend):
                     (key, expires_at),
                 )
                 acquired = cur.rowcount == 1
-            conn.commit()
-            return acquired
-        finally:
-            conn.close()
-
-    # ------------------------------------------------------------------
-    # SnapshotBackend interface
-    # ------------------------------------------------------------------
-
-    async def save(self, records: list[TaskRecord]) -> int:
-        return await asyncio.to_thread(self._save_sync, records)
-
-    async def load(self) -> list[TaskRecord]:
-        return await asyncio.to_thread(self._load_sync)
-
-    async def save_pending(self, records: list[TaskRecord]) -> int:
-        return await asyncio.to_thread(self._save_pending_sync, records)
-
-    async def load_pending(self) -> list[TaskRecord]:
-        return await asyncio.to_thread(self._load_pending_sync)
-
-    async def clear_pending(self) -> None:
-        await asyncio.to_thread(self._clear_pending_sync)
-
-    async def claim_pending(self, task_id: str) -> bool:
-        return await asyncio.to_thread(self._claim_pending_sync, task_id)
-
-    async def check_idempotency_key(self, key: str) -> str | None:
-        return await asyncio.to_thread(self._check_idempotency_key_sync, key)
-
-    async def record_idempotency_key(self, key: str, task_id: str) -> None:
-        await asyncio.to_thread(self._record_idempotency_key_sync, key, task_id)
-
-    async def delete_before(self, cutoff: datetime) -> int:
-        return await asyncio.to_thread(self._delete_before_sync, cutoff.isoformat())
-
-    async def delete_records(self, task_ids: list[str]) -> int:
-        return await asyncio.to_thread(self._delete_records_sync, task_ids)
-
-    async def completed_ids(self, task_ids: list[str]) -> set[str]:
-        if not task_ids:
-            return set()
-        return await asyncio.to_thread(self._completed_ids_sync, task_ids)
-
-    async def acquire_schedule_lock(self, key: str, ttl: int) -> bool:
-        return await asyncio.to_thread(self._acquire_schedule_lock_sync, key, ttl)
+        return acquired
 
     async def close(self) -> None:
-        pass  # connections are opened and closed per operation
+        self._executor.shutdown(wait=True)
+        with self._conns_lock:
+            for conn in self._all_conns:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            self._all_conns.clear()
 
 
 # ------------------------------------------------------------------

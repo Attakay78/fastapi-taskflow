@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import sqlite3
+import threading
 from datetime import datetime, timedelta
-from .base import SnapshotBackend
+from .base import ThreadedSnapshotBackend
 from ..models import TaskRecord, TaskStatus
 
 _CREATE_HISTORY = """
@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS task_snapshots (
     stacktrace        TEXT,
     encrypted_payload TEXT,
     source            TEXT DEFAULT 'manual',
-    executor          TEXT
+    executor          TEXT,
+    queue             TEXT DEFAULT 'default'
 )
 """
 
@@ -81,6 +82,13 @@ _MIGRATIONS = [
     "ALTER TABLE task_pending_requeue ADD COLUMN queue TEXT DEFAULT 'default'",
 ]
 
+_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_snap_status ON task_snapshots(status)",
+    "CREATE INDEX IF NOT EXISTS idx_snap_end_status ON task_snapshots(end_time, status)",
+    "CREATE INDEX IF NOT EXISTS idx_snap_snapshotted ON task_snapshots(snapshotted_at)",
+    "CREATE INDEX IF NOT EXISTS idx_snap_func_name ON task_snapshots(func_name)",
+]
+
 _UPSERT_HISTORY = """
 INSERT OR REPLACE INTO task_snapshots
     (task_id, func_name, status, created_at, start_time, end_time,
@@ -97,7 +105,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
-class SqliteBackend(SnapshotBackend):
+class SqliteBackend(ThreadedSnapshotBackend):
     """
     Persist task snapshots to a local SQLite file.
 
@@ -105,6 +113,9 @@ class SqliteBackend(SnapshotBackend):
 
     Args:
         db_path: Path to the SQLite file (created automatically if absent).
+        max_workers: Thread pool size for offloading sync operations (default 4).
+            Each thread holds one persistent connection, so this also caps the
+            number of open file handles.
 
     Example::
 
@@ -120,13 +131,26 @@ class SqliteBackend(SnapshotBackend):
     remains fully supported for backwards compatibility.
     """
 
-    def __init__(self, db_path: str = "tasks.db") -> None:
+    def __init__(self, db_path: str = "tasks.db", *, max_workers: int = 4) -> None:
+        super().__init__(max_workers=max_workers, thread_name_prefix="taskflow-sqlite")
         self._db_path = db_path
+        self._local = threading.local()
+        self._all_conns: list = []
+        self._conns_lock = threading.Lock()
         self._init_db()
 
     # ------------------------------------------------------------------
-    # Internal helpers (synchronous — offloaded to a thread by the caller)
+    # Internal helpers
     # ------------------------------------------------------------------
+
+    def _get_conn(self) -> sqlite3.Connection:
+        if not hasattr(self._local, "conn") or self._local.conn is None:
+            conn = sqlite3.connect(self._db_path)
+            conn.execute("PRAGMA journal_mode=WAL")
+            with self._conns_lock:
+                self._all_conns.append(conn)
+            self._local.conn = conn
+        return self._local.conn
 
     def _init_db(self) -> None:
         """Create tables and apply any pending schema migrations.
@@ -147,11 +171,13 @@ class SqliteBackend(SnapshotBackend):
                     conn.execute(migration)
                 except sqlite3.OperationalError:
                     pass  # column already exists
+            for index in _INDEXES:
+                conn.execute(index)
 
     def _save_sync(self, records: "list[TaskRecord]") -> int:
-        """Upsert *records* into the history table. Returns the number written."""
         now = datetime.utcnow().isoformat()
-        with sqlite3.connect(self._db_path) as conn:
+        conn = self._get_conn()
+        with conn:
             conn.executemany(
                 _UPSERT_HISTORY,
                 (
@@ -182,8 +208,8 @@ class SqliteBackend(SnapshotBackend):
         return len(records)
 
     def _save_pending_sync(self, records: "list[TaskRecord]") -> int:
-        """Replace the pending table with *records*. Returns the number written."""
-        with sqlite3.connect(self._db_path) as conn:
+        conn = self._get_conn()
+        with conn:
             conn.execute("DELETE FROM task_pending_requeue")
             if records:
                 conn.executemany(
@@ -207,14 +233,12 @@ class SqliteBackend(SnapshotBackend):
         return len(records)
 
     def _load_pending_sync(self) -> "list[TaskRecord]":
-        """Read all rows from the pending table and return them as TaskRecord objects."""
-        with sqlite3.connect(self._db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute("SELECT * FROM task_pending_requeue").fetchall()
-
+        conn = self._get_conn()
+        cur = conn.execute("SELECT * FROM task_pending_requeue")
+        cols = [desc[0] for desc in cur.description]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
         records: list[TaskRecord] = []
-        for row in rows:
-            d = dict(row)
+        for d in rows:
             enc = d.get("encrypted_payload")
             records.append(
                 TaskRecord(
@@ -238,35 +262,28 @@ class SqliteBackend(SnapshotBackend):
         return records
 
     def _clear_pending_sync(self) -> None:
-        """Delete all rows from the pending table."""
-        with sqlite3.connect(self._db_path) as conn:
+        conn = self._get_conn()
+        with conn:
             conn.execute("DELETE FROM task_pending_requeue")
 
     def _claim_pending_sync(self, task_id: str) -> bool:
-        """Delete the pending row for *task_id* and return ``True`` if this call deleted it.
-
-        SQLite's ``DELETE`` reports ``rowcount == 0`` when the row was already gone,
-        which means another process claimed it first.
-        """
-        with sqlite3.connect(self._db_path) as conn:
+        conn = self._get_conn()
+        with conn:
             cur = conn.execute(
                 "DELETE FROM task_pending_requeue WHERE task_id = ?", (task_id,)
             )
             return cur.rowcount == 1
 
     def _check_idempotency_key_sync(self, key: str) -> "str | None":
-        """Return the ``task_id`` stored for *key*, or ``None`` if not found."""
-        with sqlite3.connect(self._db_path) as conn:
-            row = conn.execute(
-                "SELECT task_id FROM task_idempotency_keys WHERE idem_key = ?", (key,)
-            ).fetchone()
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT task_id FROM task_idempotency_keys WHERE idem_key = ?", (key,)
+        ).fetchone()
         return row[0] if row else None
 
     def _record_idempotency_key_sync(self, key: str, task_id: str) -> None:
-        """Insert *key* -> *task_id* into the idempotency table (ignored if already present)."""
-        from datetime import datetime
-
-        with sqlite3.connect(self._db_path) as conn:
+        conn = self._get_conn()
+        with conn:
             conn.execute(
                 "INSERT OR IGNORE INTO task_idempotency_keys (idem_key, task_id, created_at)"
                 " VALUES (?, ?, ?)",
@@ -274,11 +291,11 @@ class SqliteBackend(SnapshotBackend):
             )
 
     def _delete_records_sync(self, task_ids: list[str]) -> int:
-        """Delete specific records from history by task ID. Returns count deleted."""
         if not task_ids:
             return 0
         placeholders = ",".join("?" * len(task_ids))
-        with sqlite3.connect(self._db_path) as conn:
+        conn = self._get_conn()
+        with conn:
             cur = conn.execute(
                 f"DELETE FROM task_snapshots WHERE task_id IN ({placeholders})",
                 task_ids,
@@ -286,8 +303,8 @@ class SqliteBackend(SnapshotBackend):
             return cur.rowcount
 
     def _delete_before_sync(self, cutoff: str) -> int:
-        """Delete terminal records older than *cutoff* (ISO format). Returns count deleted."""
-        with sqlite3.connect(self._db_path) as conn:
+        conn = self._get_conn()
+        with conn:
             cur = conn.execute(
                 "DELETE FROM task_snapshots"
                 " WHERE end_time IS NOT NULL AND end_time < ?"
@@ -297,50 +314,39 @@ class SqliteBackend(SnapshotBackend):
             return cur.rowcount
 
     def _completed_ids_sync(self, task_ids: list[str]) -> set[str]:
-        """Return the subset of *task_ids* that exist in history with success status."""
         placeholders = ",".join("?" * len(task_ids))
-        with sqlite3.connect(self._db_path) as conn:
-            rows = conn.execute(
-                f"SELECT task_id FROM task_snapshots WHERE task_id IN ({placeholders})"
-                " AND status = 'success'",
-                task_ids,
-            ).fetchall()
+        conn = self._get_conn()
+        rows = conn.execute(
+            f"SELECT task_id FROM task_snapshots WHERE task_id IN ({placeholders})"
+            " AND status = 'success'",
+            task_ids,
+        ).fetchall()
         return {row[0] for row in rows}
 
     def _acquire_schedule_lock_sync(self, key: str, ttl: int) -> bool:
-        """Try to insert a lock row, replacing it if it has expired.
-
-        Returns ``True`` if the lock was acquired, ``False`` if another
-        instance holds a live lock for *key*.
-        """
         now = datetime.utcnow()
         expires_at = (now + timedelta(seconds=ttl)).isoformat()
         now_iso = now.isoformat()
-        with sqlite3.connect(self._db_path) as conn:
-            # Delete any expired lock for this key first.
+        conn = self._get_conn()
+        with conn:
             conn.execute(
                 "DELETE FROM task_schedule_locks WHERE lock_key = ? AND expires_at <= ?",
                 (key, now_iso),
             )
-            try:
-                conn.execute(
-                    "INSERT INTO task_schedule_locks (lock_key, expires_at) VALUES (?, ?)",
-                    (key, expires_at),
-                )
-                return True
-            except sqlite3.IntegrityError:
-                # Another instance holds a live (non-expired) lock.
-                return False
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO task_schedule_locks (lock_key, expires_at)"
+                " VALUES (?, ?)",
+                (key, expires_at),
+            )
+            return cur.rowcount == 1
 
     def _load_sync(self) -> "list[TaskRecord]":
-        """Read all rows from the history table and return them as TaskRecord objects."""
-        with sqlite3.connect(self._db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute("SELECT * FROM task_snapshots").fetchall()
-
+        conn = self._get_conn()
+        cur = conn.execute("SELECT * FROM task_snapshots")
+        cols = [desc[0] for desc in cur.description]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
         records: list[TaskRecord] = []
-        for row in rows:
-            d = dict(row)
+        for d in rows:
             enc = d.get("encrypted_payload")
             records.append(
                 TaskRecord(
@@ -377,70 +383,36 @@ class SqliteBackend(SnapshotBackend):
             )
         return records
 
-    # ------------------------------------------------------------------
-    # SnapshotBackend interface
-    # ------------------------------------------------------------------
-
-    async def save(self, records: "list[TaskRecord]") -> int:
-        return await asyncio.to_thread(self._save_sync, records)
-
-    async def load(self) -> "list[TaskRecord]":
-        return await asyncio.to_thread(self._load_sync)
-
-    async def save_pending(self, records: "list[TaskRecord]") -> int:
-        return await asyncio.to_thread(self._save_pending_sync, records)
-
-    async def load_pending(self) -> "list[TaskRecord]":
-        return await asyncio.to_thread(self._load_pending_sync)
-
-    async def clear_pending(self) -> None:
-        await asyncio.to_thread(self._clear_pending_sync)
-
-    async def claim_pending(self, task_id: str) -> bool:
-        return await asyncio.to_thread(self._claim_pending_sync, task_id)
-
-    async def check_idempotency_key(self, key: str) -> "str | None":
-        return await asyncio.to_thread(self._check_idempotency_key_sync, key)
-
-    async def record_idempotency_key(self, key: str, task_id: str) -> None:
-        await asyncio.to_thread(self._record_idempotency_key_sync, key, task_id)
-
-    async def delete_records(self, task_ids: list[str]) -> int:
-        return await asyncio.to_thread(self._delete_records_sync, task_ids)
-
-    async def delete_before(self, cutoff: datetime) -> int:
-        return await asyncio.to_thread(self._delete_before_sync, cutoff.isoformat())
-
-    async def completed_ids(self, task_ids: list[str]) -> set[str]:
-        if not task_ids:
-            return set()
-        return await asyncio.to_thread(self._completed_ids_sync, task_ids)
-
-    async def acquire_schedule_lock(self, key: str, ttl: int) -> bool:
-        return await asyncio.to_thread(self._acquire_schedule_lock_sync, key, ttl)
-
     async def save_metadata(self, key: str, value: str) -> None:
         def _sync() -> None:
-            with sqlite3.connect(self._db_path) as conn:
+            conn = self._get_conn()
+            with conn:
                 conn.execute(
                     "INSERT OR REPLACE INTO task_metadata (key, value) VALUES (?, ?)",
                     (key, value),
                 )
 
-        await asyncio.to_thread(_sync)
+        await self._run(_sync)
 
     async def load_metadata(self, key: str) -> "str | None":
         def _sync() -> "str | None":
-            with sqlite3.connect(self._db_path) as conn:
-                row = conn.execute(
-                    "SELECT value FROM task_metadata WHERE key = ?", (key,)
-                ).fetchone()
+            conn = self._get_conn()
+            row = conn.execute(
+                "SELECT value FROM task_metadata WHERE key = ?", (key,)
+            ).fetchone()
             return row[0] if row else None
 
-        return await asyncio.to_thread(_sync)
+        return await self._run(_sync)
 
     async def close(self) -> None:
-        pass  # SQLite connections are opened/closed per-operation
+        self._executor.shutdown(wait=True)
+        with self._conns_lock:
+            for conn in self._all_conns:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            self._all_conns.clear()
 
     # ------------------------------------------------------------------
     # Query helper (SQLite-specific — not part of the base protocol)

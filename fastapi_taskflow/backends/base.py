@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -213,3 +215,105 @@ class SnapshotBackend(ABC):
     @abstractmethod
     async def close(self) -> None:
         """Release any held resources (connections, file handles, etc.)."""
+
+
+class ThreadedSnapshotBackend(SnapshotBackend):
+    """Base for backends that offload sync DB operations to a dedicated thread pool.
+
+    Subclasses implement the ``_*_sync`` methods.  This class owns the
+    executor, ``_run``, and all async interface methods so they are not
+    duplicated across backends.
+    """
+
+    def __init__(self, max_workers: int, thread_name_prefix: str) -> None:
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix=thread_name_prefix
+        )
+
+    async def _run(self, fn, *args):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, fn, *args)
+
+    # ------------------------------------------------------------------
+    # Sync contract — subclasses implement these
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    def _save_sync(self, records: "list[TaskRecord]") -> int: ...
+
+    @abstractmethod
+    def _load_sync(self) -> "list[TaskRecord]": ...
+
+    @abstractmethod
+    def _save_pending_sync(self, records: "list[TaskRecord]") -> int: ...
+
+    @abstractmethod
+    def _load_pending_sync(self) -> "list[TaskRecord]": ...
+
+    @abstractmethod
+    def _clear_pending_sync(self) -> None: ...
+
+    @abstractmethod
+    def _claim_pending_sync(self, task_id: str) -> bool: ...
+
+    @abstractmethod
+    def _check_idempotency_key_sync(self, key: str) -> "str | None": ...
+
+    @abstractmethod
+    def _record_idempotency_key_sync(self, key: str, task_id: str) -> None: ...
+
+    @abstractmethod
+    def _delete_before_sync(self, cutoff: str) -> int: ...
+
+    @abstractmethod
+    def _delete_records_sync(self, task_ids: list[str]) -> int: ...
+
+    @abstractmethod
+    def _completed_ids_sync(self, task_ids: list[str]) -> "set[str]": ...
+
+    @abstractmethod
+    def _acquire_schedule_lock_sync(self, key: str, ttl: int) -> bool: ...
+
+    # ------------------------------------------------------------------
+    # Async interface — single implementation for all threaded backends
+    # ------------------------------------------------------------------
+
+    async def save(self, records: "list[TaskRecord]") -> int:
+        return await self._run(self._save_sync, records)
+
+    async def load(self) -> "list[TaskRecord]":
+        return await self._run(self._load_sync)
+
+    async def save_pending(self, records: "list[TaskRecord]") -> int:
+        return await self._run(self._save_pending_sync, records)
+
+    async def load_pending(self) -> "list[TaskRecord]":
+        return await self._run(self._load_pending_sync)
+
+    async def clear_pending(self) -> None:
+        await self._run(self._clear_pending_sync)
+
+    async def claim_pending(self, task_id: str) -> bool:
+        return await self._run(self._claim_pending_sync, task_id)
+
+    async def check_idempotency_key(self, key: str) -> "str | None":
+        return await self._run(self._check_idempotency_key_sync, key)
+
+    async def record_idempotency_key(self, key: str, task_id: str) -> None:
+        await self._run(self._record_idempotency_key_sync, key, task_id)
+
+    async def delete_before(self, cutoff: datetime) -> int:
+        return await self._run(self._delete_before_sync, cutoff.isoformat())
+
+    async def delete_records(self, task_ids: list[str]) -> int:
+        if not task_ids:
+            return 0
+        return await self._run(self._delete_records_sync, task_ids)
+
+    async def completed_ids(self, task_ids: list[str]) -> "set[str]":
+        if not task_ids:
+            return set()
+        return await self._run(self._completed_ids_sync, task_ids)
+
+    async def acquire_schedule_lock(self, key: str, ttl: int) -> bool:
+        return await self._run(self._acquire_schedule_lock_sync, key, ttl)

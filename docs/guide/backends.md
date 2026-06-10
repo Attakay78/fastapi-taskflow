@@ -113,6 +113,8 @@ task_manager = TaskManager(snapshot_backend=SqliteBackend("tasks.db"))
 
 **Caveats:** SQLite is file-local. It works for multiple processes on the same host (WAL mode is enabled automatically), but it cannot be shared across separate machines.
 
+**Thread pool:** `SqliteBackend` uses a dedicated thread pool with one persistent connection per thread. The default `max_workers=4` is fine for most workloads. Raise it only if you see backend operations queuing behind each other under heavy snapshot load.
+
 **Extras:** `SqliteBackend` includes a `query()` method for filtering history by status and function name. This method is not part of the `SnapshotBackend` ABC and is not available on the other backends.
 
 ### Redis
@@ -153,7 +155,21 @@ task_manager = TaskManager(
 
 **When to use it:** Multi-host deployments where you want durable, queryable task history using standard SQL, or where PostgreSQL is already your primary database.
 
-**Caveats:** Tables are created automatically on first startup. All operations wrap `psycopg2` in `asyncio.to_thread` to keep the interface non-blocking.
+**Caveats:** Tables are created automatically on first startup. Uses a `psycopg2.ThreadedConnectionPool` with a dedicated thread pool, so connections are reused across operations rather than opened per call.
+
+**Pool sizing:** `min_conn` sets how many connections are kept open at all times (default 1). `max_conn` sets the upper bound (default 5). A connection is borrowed from the pool for each backend operation and returned immediately after. If all connections are in use when a new operation starts, it will block until one is released. Set `max_conn` to at least `max_workers` so no thread ever has to wait for a connection.
+
+**Thread pool:** `max_workers` controls the size of the dedicated thread pool that runs all backend I/O (default 4). This thread pool is separate from FastAPI's default asyncio executor, so backend operations do not compete with sync task execution. The default is suitable for most deployments.
+
+**Pool injection:** If your application already manages a `psycopg2` connection pool, pass it directly via the `pool` parameter. The backend will use it without closing it on shutdown:
+
+```python
+import psycopg2.pool
+from fastapi_taskflow.backends import PostgresBackend
+
+existing_pool = psycopg2.pool.ThreadedConnectionPool(1, 10, dsn)
+backend = PostgresBackend(pool=existing_pool)
+```
 
 ### MySQL / MariaDB
 
@@ -173,7 +189,9 @@ task_manager = TaskManager(
 
 **When to use it:** Multi-host deployments where MySQL or MariaDB is your primary database.
 
-**Caveats:** Tables are created automatically on first startup. All operations use `PyMySQL` wrapped in `asyncio.to_thread`.
+**Caveats:** Tables are created automatically on first startup. One persistent connection is kept per executor thread and reused across operations. Stale connections dropped by MySQL's `wait_timeout` are detected and reconnected automatically.
+
+**Thread pool:** `max_workers` controls the size of the dedicated thread pool (default 4). Because each thread holds exactly one connection, `max_workers` also caps the total number of open MySQL connections. Raise it if backend operations are queuing under high load, keeping in mind that each additional worker opens one more connection to MySQL.
 
 ## Writing a custom backend
 

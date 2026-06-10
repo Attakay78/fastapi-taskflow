@@ -1,6 +1,5 @@
 import asyncio
 import contextvars
-import inspect
 import logging
 import pickle
 import uuid
@@ -133,21 +132,6 @@ class ManagedBackgroundTasks(BackgroundTasks):
 
         # Resolve the executor that will run this task.
         executor_obj = self._task_manager._resolve_executor(func, config)
-
-        # Eager dispatch is incompatible with the process executor because the
-        # pool is designed for background use after the response is sent. When
-        # both are active, fall back to the natural in-process executor and log
-        # a warning so the developer is aware.
-        if run_eager and executor_obj.name == "process":
-            logger.warning(
-                "fastapi-taskflow: task %r uses executor='process' but eager=True "
-                "is also set. Process executor is bypassed for eager dispatch; "
-                "the task will run in-process instead. Use the standard (non-eager) "
-                "dispatch path for process executor tasks.",
-                func.__name__,
-            )
-            fallback_name = "async" if inspect.iscoroutinefunction(func) else "thread"
-            executor_obj = self._task_manager._executors[fallback_name]
 
         # Validate arguments for executors that have per-enqueue constraints
         # (currently only the process executor, which requires picklable args).
