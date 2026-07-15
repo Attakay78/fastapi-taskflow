@@ -1,4 +1,5 @@
 from fastapi_taskflow.executor import execute_task
+from fastapi_taskflow.manager import _DaemonThreadPoolExecutor
 from fastapi_taskflow.models import TaskConfig, TaskStatus
 from fastapi_taskflow.store import TaskStore
 
@@ -39,6 +40,19 @@ async def test_sync_task_with_args():
     await execute_task(func, "t1", TaskConfig(), store, (1, 2), {"z": 3})
 
     assert captured == [(1, 2, 3)]
+
+
+def test_daemon_thread_pool_executor_adjusts_without_initializer_attributes():
+    executor = _DaemonThreadPoolExecutor(max_workers=1)
+
+    for attr in ("_initializer", "_initargs"):
+        if hasattr(executor, attr):
+            delattr(executor, attr)
+
+    executor._adjust_thread_count()
+
+    assert len(executor._threads) == 1
+    executor.shutdown(wait=True, cancel_futures=True)
 
 
 # ---------------------------------------------------------------------------
