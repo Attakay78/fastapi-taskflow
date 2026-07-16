@@ -1,7 +1,21 @@
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal, Optional
+
+
+def _iso_utc(dt: "datetime | None") -> "str | None":
+    """Serialize a datetime as an unambiguous UTC ISO 8601 string.
+
+    Naive datetimes are treated as UTC (the convention used everywhere in
+    this codebase) rather than left offset-less, since an offset-less ISO
+    string is parsed as local time by JS ``Date`` and most other clients.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 
 @dataclass
@@ -164,7 +178,7 @@ class TaskRecord:
     status: TaskStatus
     args: tuple = field(default_factory=tuple)
     kwargs: dict = field(default_factory=dict)
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     start_time: datetime | None = None
     end_time: datetime | None = None
     retries_used: int = 0
@@ -224,9 +238,9 @@ class TaskRecord:
             "task_id": self.task_id,
             "func_name": self.func_name,
             "status": self.status.value,
-            "created_at": self.created_at.isoformat(),
-            "start_time": self.start_time.isoformat() if self.start_time else None,
-            "end_time": self.end_time.isoformat() if self.end_time else None,
+            "created_at": _iso_utc(self.created_at),
+            "start_time": _iso_utc(self.start_time),
+            "end_time": _iso_utc(self.end_time),
             "duration": self.duration,
             "retries_used": self.retries_used,
             "error": self.error,
@@ -266,6 +280,6 @@ class AuditEntry:
             "action": self.action,
             "task_id": self.task_id,
             "actor": self.actor,
-            "timestamp": self.timestamp.isoformat(),
+            "timestamp": _iso_utc(self.timestamp),
             "detail": self.detail,
         }
