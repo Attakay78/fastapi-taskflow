@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.11.0
+
+- Timestamps (`created_at`, `start_time`, `end_time`, audit log, task logs) are now always serialized with an explicit UTC offset. The dashboard displays and filters times in the viewer's local timezone instead of misreading them as local time.
+- Fixed a Python 3.14 compatibility issue with the thread executor's daemon threads.
+- Updated docs with production config guidance for concurrency controls.
+- Updated contributing guide and enabled CI on the `develop` branch.
+
+---
+
 ## v0.10.0
 
 Improves connection handling across all three database backends.
