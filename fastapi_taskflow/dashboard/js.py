@@ -763,8 +763,8 @@ DASHBOARD_JS = r"""
       ? '<div class="d-logs">'
         + task.logs.map(function(line) {
             if (line.startsWith('--- ')) return '<div class="log-sep">' + esc(line) + '</div>';
-            var ts = line.slice(0, 19), msg = line.slice(20);
-            return '<div class="log-line"><span class="log-ts">' + esc(ts) + '</span><span>' + esc(msg) + '</span></div>';
+            var ts = line.slice(0, 20), msg = line.slice(21);
+            return '<div class="log-line"><span class="log-ts">' + esc(fmtDate(ts)) + '</span><span>' + esc(msg) + '</span></div>';
           }).join('')
         + '</div>'
       : '';
@@ -844,7 +844,7 @@ DASHBOARD_JS = r"""
         t.status,
         t.duration != null ? (t.duration * 1000).toFixed(0) : '',
         t.retries_used,
-        t.created_at || '',
+        t.created_at ? fmtDateFull(t.created_at) : '',
         t.error ? t.error.replace(/[\r\n]+/g, ' ') : '',
       ].map(csvCell);
     }));
@@ -870,7 +870,15 @@ DASHBOARD_JS = r"""
 
   function fmtDate(iso) {
     try {
-      return new Date(iso).toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', second:'2-digit' });
+      return new Date(iso).toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', second:'2-digit', timeZoneName:'short' });
+    } catch(e) { return iso; }
+  }
+
+  // Like fmtDate but includes the year, for contexts (e.g. CSV export) where
+  // rows may span multiple years and the local date needs to be unambiguous.
+  function fmtDateFull(iso) {
+    try {
+      return new Date(iso).toLocaleString(undefined, { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', timeZoneName:'short' });
     } catch(e) { return iso; }
   }
 

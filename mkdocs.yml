@@ -77,6 +77,7 @@ nav:
     - File Logging: guide/file-logging.md
     - Argument Encryption: guide/encryption.md
     - Concurrency Controls: guide/concurrency.md
+    - Production Configuration: guide/production.md
     - Process Executor: guide/process-tasks.md
     - Named Queues: guide/named-queues.md
     - Priority Queues: guide/priority-queues.md

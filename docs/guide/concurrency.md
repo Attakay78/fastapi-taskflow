@@ -100,3 +100,5 @@ See [Process Executor](process-tasks.md) for the full guide, including constrain
 
 !!! note
     There is one remaining edge case for async tasks: a coroutine that never yields will block the event loop for as long as it runs, regardless of the semaphore. Tasks should `await` regularly, or delegate any CPU-heavy work to a thread or process.
+
+For a copy-paste baseline and a sizing guide covering all concurrency parameters, see [Production Configuration](production.md).
