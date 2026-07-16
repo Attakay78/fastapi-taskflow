@@ -281,7 +281,7 @@ class LoggingMiddleware:
         def sink(msg: str, level: str, extra: dict) -> None:
             ts = datetime.now(timezone.utc)
             ctx.store.append_log(
-                ctx.task_id, f"{ts.strftime('%Y-%m-%dT%H:%M:%S')} {msg}"
+                ctx.task_id, f"{ts.strftime('%Y-%m-%dT%H:%M:%SZ')} {msg}"
             )
             if ctx.logger is not None:
                 event = LogEvent(

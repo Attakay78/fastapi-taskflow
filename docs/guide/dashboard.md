@@ -88,6 +88,9 @@ Controls in the filter panel let you narrow the task table:
 
 All active filters combine: a task must pass every one of them to appear in the table. The table paginates at 30 tasks per page.
 
+!!! note "Timestamps and timezones"
+    Task times (`created_at`, `started`, `ended`) are stored and transmitted as UTC, and the dashboard renders them in your browser's local timezone, with the zone abbreviation shown alongside each time (e.g. "Jul 15, 2:32:01 PM PDT"). The **time-range picker** compares against your browser's current time, so "last 6 hours" always means the 6 hours before *your* local now, regardless of where the server is deployed.
+
 ---
 
 ## Task Detail Panel

@@ -210,7 +210,7 @@ def create_router(
                 action="update_queue",
                 task_id=queue_name,
                 actor=_actor(request, secret_key),
-                timestamp=__import__("datetime").datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 detail={"concurrency": body.concurrency, "max_size": body.max_size},
             )
         )
