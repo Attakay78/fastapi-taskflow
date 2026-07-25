@@ -61,8 +61,14 @@ def _entry(run_key="k1", func_name="my_task", seconds=60, **kw):
 @pytest.mark.asyncio
 async def test_save_and_load_due_round_trip(backend):
     await backend.save_scheduled(
-        _entry(args=("tx1",), kwargs={"reason": "timeout"}, tags={"env": "prod"},
-               priority=5, queue="reports", idempotency_key="idem-1")
+        _entry(
+            args=("tx1",),
+            kwargs={"reason": "timeout"},
+            tags={"env": "prod"},
+            priority=5,
+            queue="reports",
+            idempotency_key="idem-1",
+        )
     )
     due = await backend.load_due(datetime.now(timezone.utc) + timedelta(minutes=5))
 
@@ -157,7 +163,9 @@ async def test_schedule_once_persists_to_backend(db_path):
         pass
 
     await tm.schedule_once(
-        my_task, "tx1", run_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        my_task,
+        "tx1",
+        run_at=datetime.now(timezone.utc) + timedelta(hours=1),
         run_key="ac:tx1",
     )
 
@@ -214,9 +222,7 @@ async def test_schedule_once_requires_a_backend():
         pass
 
     with pytest.raises(RuntimeError, match="requires a snapshot backend"):
-        await tm.schedule_once(
-            my_task, run_at=datetime.now(timezone.utc), run_key="k1"
-        )
+        await tm.schedule_once(my_task, run_at=datetime.now(timezone.utc), run_key="k1")
 
 
 @pytest.mark.asyncio
@@ -249,9 +255,7 @@ async def test_schedule_once_rejects_backend_without_support(db_path):
         pass
 
     with pytest.raises(RuntimeError, match="does not support one-off schedules"):
-        await tm.schedule_once(
-            my_task, run_at=datetime.now(timezone.utc), run_key="k1"
-        )
+        await tm.schedule_once(my_task, run_at=datetime.now(timezone.utc), run_key="k1")
 
 
 @pytest.mark.asyncio
