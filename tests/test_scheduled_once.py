@@ -536,6 +536,7 @@ async def test_refill_is_idempotent_for_unchanged_entries(db_path):
 
 @pytest.mark.asyncio
 async def test_encrypted_args_survive_the_round_trip(db_path):
+    pytest.importorskip("cryptography")
     from cryptography.fernet import Fernet
 
     tm = TaskManager(snapshot_db=db_path, encrypt_args_key=Fernet.generate_key())
