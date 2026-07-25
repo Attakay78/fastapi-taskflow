@@ -10,6 +10,9 @@ Scheduled tasks let you define that work alongside your regular tasks and have i
 
 Scheduled tasks use exactly the same execution path as manually enqueued tasks. Retries, logging, persistence, and the dashboard all work without any extra setup.
 
+!!! tip
+    This page covers recurring schedules, where the cadence is fixed at import time. To run a task once at a time your application computes at runtime, such as acting on a record when its own deadline passes, see [One-Off Scheduled Tasks](one-off-tasks.md).
+
 ## Basic setup
 
 Decorate a function with `@task_manager.schedule()` and pass either `every=` (an interval in seconds) or `cron=` (a cron expression).

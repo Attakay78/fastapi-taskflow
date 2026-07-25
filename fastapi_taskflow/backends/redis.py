@@ -23,14 +23,15 @@ Example::
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal, cast
 
 from .base import SnapshotBackend
-from ..models import TaskRecord, TaskStatus
+from ..models import ScheduledOnce, TaskRecord, TaskStatus
 
 _INDEX_SUFFIX = ":_index"
 _PENDING_SUFFIX = ":_pending"
+_SCHEDULED_SUFFIX = ":_scheduled"
 
 
 class RedisBackend(SnapshotBackend):
@@ -55,6 +56,8 @@ class RedisBackend(SnapshotBackend):
         The ``redis`` package is **not** installed by default.  Add it to
         your project with ``pip install "redis[asyncio]"``.
     """
+
+    supports_scheduled_once = True
 
     def __init__(
         self,
@@ -96,6 +99,14 @@ class RedisBackend(SnapshotBackend):
 
     def _pending_index_key(self) -> str:
         return f"{self._prefix}{_PENDING_SUFFIX}:_index"
+
+    def _scheduled_key(self, run_key: str) -> str:
+        return f"{self._prefix}{_SCHEDULED_SUFFIX}:{run_key}"
+
+    def _scheduled_index_key(self) -> str:
+        # Sorted set scored by fire_at epoch seconds, so the horizon query is
+        # a single ZRANGEBYSCORE rather than a scan over every pending entry.
+        return f"{self._prefix}{_SCHEDULED_SUFFIX}:_index"
 
     @staticmethod
     def _record_to_mapping(record: "TaskRecord") -> dict[str, str]:
@@ -321,6 +332,112 @@ class RedisBackend(SnapshotBackend):
         results = await pipe.execute()
         # results[0] = number of keys deleted (1 if we got it, 0 if already gone)
         return results[0] == 1
+
+    # ------------------------------------------------------------------
+    # One-off schedules
+    # ------------------------------------------------------------------
+
+    async def save_scheduled(self, entry: "ScheduledOnce") -> None:
+        """Store the entry as a hash and index it by fire_at in a sorted set.
+
+        Both writes are unconditional overwrites, which is what gives
+        rescheduling its replace-in-place semantics: ``ZADD`` updates the
+        score of an existing member rather than adding a duplicate.
+        """
+        client = self._get_client()
+        mapping = {
+            "run_key": entry.run_key,
+            "func_name": entry.func_name,
+            "fire_at": entry.fire_at.isoformat(),
+            "created_at": entry.created_at.isoformat(),
+            "args_json": json.dumps(list(entry.args), default=repr),
+            "kwargs_json": json.dumps(entry.kwargs, default=repr),
+            "encrypted_payload": entry.encrypted_payload.decode()
+            if entry.encrypted_payload
+            else "",
+            "queue": entry.queue,
+            "priority": str(entry.priority) if entry.priority is not None else "",
+            "idempotency_key": entry.idempotency_key or "",
+            "tags_json": json.dumps(entry.tags) if entry.tags else "",
+        }
+        pipe = client.pipeline()
+        pipe.delete(self._scheduled_key(entry.run_key))
+        pipe.hset(self._scheduled_key(entry.run_key), mapping=mapping)
+        pipe.zadd(
+            self._scheduled_index_key(),
+            {entry.run_key: entry.fire_at.timestamp()},
+        )
+        await pipe.execute()
+
+    async def load_due(self, before: datetime) -> "list[ScheduledOnce]":
+        client = self._get_client()
+        run_keys = await client.zrangebyscore(
+            self._scheduled_index_key(), "-inf", before.timestamp()
+        )
+        if not run_keys:
+            return []
+
+        decoded = [k.decode() if isinstance(k, bytes) else k for k in run_keys]
+        pipe = client.pipeline()
+        for run_key in decoded:
+            pipe.hgetall(self._scheduled_key(run_key))
+        raw_entries = await pipe.execute()
+
+        entries: list[ScheduledOnce] = []
+        stale: list[str] = []
+        for run_key, raw in zip(decoded, raw_entries):
+            if not raw:
+                # Hash expired or was deleted without the index being updated.
+                stale.append(run_key)
+                continue
+            entries.append(self._mapping_to_scheduled(raw))
+
+        if stale:
+            await client.zrem(self._scheduled_index_key(), *stale)
+        return entries
+
+    async def delete_scheduled(self, run_key: str) -> bool:
+        client = self._get_client()
+        pipe = client.pipeline()
+        pipe.delete(self._scheduled_key(run_key))
+        pipe.zrem(self._scheduled_index_key(), run_key)
+        results = await pipe.execute()
+        return results[0] == 1
+
+    async def claim_scheduled(self, run_key: str) -> bool:
+        """Atomically remove the entry, reporting whether we won the race.
+
+        ``DEL`` returning 1 means this caller removed the hash, so exactly
+        one instance proceeds to fire.
+        """
+        return await self.delete_scheduled(run_key)
+
+    @staticmethod
+    def _mapping_to_scheduled(raw: dict) -> "ScheduledOnce":
+        """Rebuild a ScheduledOnce from a Redis hash mapping."""
+
+        def _s(key: str) -> str:
+            value = raw.get(key.encode(), raw.get(key, ""))
+            return value.decode() if isinstance(value, bytes) else (value or "")
+
+        priority = _s("priority")
+        return ScheduledOnce(
+            run_key=_s("run_key"),
+            func_name=_s("func_name"),
+            fire_at=datetime.fromisoformat(_s("fire_at")),
+            created_at=datetime.fromisoformat(_s("created_at"))
+            if _s("created_at")
+            else datetime.now(timezone.utc),
+            args=tuple(json.loads(_s("args_json"))) if _s("args_json") else (),
+            kwargs=json.loads(_s("kwargs_json")) if _s("kwargs_json") else {},
+            encrypted_payload=_s("encrypted_payload").encode()
+            if _s("encrypted_payload")
+            else None,
+            queue=_s("queue") or "default",
+            priority=int(priority) if priority else None,
+            idempotency_key=_s("idempotency_key") or None,
+            tags=json.loads(_s("tags_json")) if _s("tags_json") else {},
+        )
 
     @staticmethod
     def _schedule_lock_key(key: str) -> str:

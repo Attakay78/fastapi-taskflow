@@ -255,6 +255,64 @@ class TaskRecord:
 
 
 @dataclass
+class ScheduledOnce:
+    """One pending one-off task, scheduled to fire at an exact future time.
+
+    Created by :meth:`~fastapi_taskflow.manager.TaskManager.schedule_once` and
+    persisted to the configured snapshot backend so the firing survives a
+    restart. Unlike a :class:`TaskRecord`, this is *not* a task invocation —
+    no ``task_id`` exists until the entry actually fires, at which point a
+    normal ``TaskRecord`` is created and this row is deleted.
+
+    Attributes:
+        run_key: Caller-supplied identity for this pending firing. Primary key.
+            Scheduling again with the same ``run_key`` replaces the entry
+            rather than creating a second one. This is a separate namespace
+            from ``TaskRecord.idempotency_key``, which deduplicates
+            *executions*; ``run_key`` identifies a *pending schedule* and is
+            deliberately replaceable.
+        func_name: Name of the registered function to run.
+        fire_at: UTC datetime at which the task should run.
+        args: Positional arguments to call the function with.
+        kwargs: Keyword arguments to call the function with.
+        encrypted_payload: Fernet-encrypted blob of ``(args, kwargs)`` when
+            ``encrypt_args_key`` is set on the ``TaskManager``. When present,
+            ``args`` and ``kwargs`` are stored empty.
+        queue: Named queue the firing should be routed into.
+        priority: Priority to enqueue the firing at.
+        idempotency_key: Optional key forwarded onto the ``TaskRecord`` when
+            this entry fires, guarding duplicate *execution*. Independent of
+            ``run_key``.
+        tags: Key/value labels forwarded onto the ``TaskRecord`` at fire time.
+        created_at: When the entry was scheduled (UTC).
+    """
+
+    run_key: str
+    func_name: str
+    fire_at: datetime
+    args: tuple = field(default_factory=tuple)
+    kwargs: dict = field(default_factory=dict)
+    encrypted_payload: bytes | None = None
+    queue: str = "default"
+    priority: int | None = None
+    idempotency_key: str | None = None
+    tags: dict[str, str] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-safe dict for the REST API and dashboard."""
+        return {
+            "run_key": self.run_key,
+            "func_name": self.func_name,
+            "fire_at": _iso_utc(self.fire_at),
+            "queue": self.queue,
+            "priority": self.priority,
+            "tags": dict(self.tags),
+            "created_at": _iso_utc(self.created_at),
+        }
+
+
+@dataclass
 class AuditEntry:
     """A single audit log entry recording a user action on a task.
 

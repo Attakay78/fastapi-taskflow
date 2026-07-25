@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from .base import ThreadedSnapshotBackend
-from ..models import TaskRecord, TaskStatus
+from ..models import ScheduledOnce, TaskRecord, TaskStatus
 
 _CREATE_HISTORY = """
 CREATE TABLE IF NOT EXISTS task_snapshots (
@@ -67,6 +67,25 @@ CREATE TABLE IF NOT EXISTS task_metadata (
 )
 """
 
+# One-off tasks scheduled to fire at an exact future time. Keyed by the
+# caller-supplied run_key so rescheduling replaces in place. fire_at is
+# indexed because the scheduler queries it every refill tick.
+_CREATE_SCHEDULED = """
+CREATE TABLE IF NOT EXISTS task_scheduled_once (
+    run_key           TEXT PRIMARY KEY,
+    func_name         TEXT NOT NULL,
+    fire_at           TEXT NOT NULL,
+    created_at        TEXT,
+    args_json         TEXT,
+    kwargs_json       TEXT,
+    encrypted_payload TEXT,
+    queue             TEXT DEFAULT 'default',
+    priority          INTEGER,
+    idempotency_key   TEXT,
+    tags_json         TEXT
+)
+"""
+
 # Migrations applied to databases created before a column existed.
 _MIGRATIONS = [
     "ALTER TABLE task_snapshots ADD COLUMN args_json TEXT",
@@ -87,6 +106,7 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_snap_end_status ON task_snapshots(end_time, status)",
     "CREATE INDEX IF NOT EXISTS idx_snap_snapshotted ON task_snapshots(snapshotted_at)",
     "CREATE INDEX IF NOT EXISTS idx_snap_func_name ON task_snapshots(func_name)",
+    "CREATE INDEX IF NOT EXISTS idx_sched_fire_at ON task_scheduled_once(fire_at)",
 ]
 
 _UPSERT_HISTORY = """
@@ -102,6 +122,15 @@ INSERT OR REPLACE INTO task_pending_requeue
     (task_id, func_name, created_at, retries_used, args_json, kwargs_json,
      encrypted_payload, queue)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+# REPLACE gives reschedule-by-run_key its semantics: scheduling again with an
+# existing run_key overwrites fire_at rather than creating a second firing.
+_UPSERT_SCHEDULED = """
+INSERT OR REPLACE INTO task_scheduled_once
+    (run_key, func_name, fire_at, created_at, args_json, kwargs_json,
+     encrypted_payload, queue, priority, idempotency_key, tags_json)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -130,6 +159,8 @@ class SqliteBackend(ThreadedSnapshotBackend):
     The shorthand ``TaskManager(snapshot_db="tasks.db")`` is equivalent and
     remains fully supported for backwards compatibility.
     """
+
+    supports_scheduled_once = True
 
     def __init__(self, db_path: str = "tasks.db", *, max_workers: int = 4) -> None:
         super().__init__(max_workers=max_workers, thread_name_prefix="taskflow-sqlite")
@@ -166,6 +197,7 @@ class SqliteBackend(ThreadedSnapshotBackend):
             conn.execute(_CREATE_IDEMPOTENCY)
             conn.execute(_CREATE_SCHEDULE_LOCKS)
             conn.execute(_CREATE_METADATA)
+            conn.execute(_CREATE_SCHEDULED)
             for migration in _MIGRATIONS:
                 try:
                     conn.execute(migration)
@@ -271,6 +303,74 @@ class SqliteBackend(ThreadedSnapshotBackend):
         with conn:
             cur = conn.execute(
                 "DELETE FROM task_pending_requeue WHERE task_id = ?", (task_id,)
+            )
+            return cur.rowcount == 1
+
+    # ------------------------------------------------------------------
+    # One-off schedules
+    # ------------------------------------------------------------------
+
+    def _save_scheduled_sync(self, entry: "ScheduledOnce") -> None:
+        conn = self._get_conn()
+        with conn:
+            conn.execute(
+                _UPSERT_SCHEDULED,
+                (
+                    entry.run_key,
+                    entry.func_name,
+                    entry.fire_at.isoformat(),
+                    entry.created_at.isoformat(),
+                    json.dumps(list(entry.args), default=repr),
+                    json.dumps(entry.kwargs, default=repr),
+                    entry.encrypted_payload.decode()
+                    if entry.encrypted_payload
+                    else None,
+                    entry.queue,
+                    entry.priority,
+                    entry.idempotency_key,
+                    json.dumps(entry.tags) if entry.tags else None,
+                ),
+            )
+
+    def _load_due_sync(self, before: str) -> "list[ScheduledOnce]":
+        conn = self._get_conn()
+        cur = conn.execute(
+            "SELECT * FROM task_scheduled_once WHERE fire_at <= ? ORDER BY fire_at",
+            (before,),
+        )
+        cols = [desc[0] for desc in cur.description]
+        entries: list[ScheduledOnce] = []
+        for row in cur.fetchall():
+            d = dict(zip(cols, row))
+            enc = d.get("encrypted_payload")
+            entries.append(
+                ScheduledOnce(
+                    run_key=d["run_key"],
+                    func_name=d["func_name"],
+                    fire_at=datetime.fromisoformat(d["fire_at"]),
+                    created_at=(
+                        datetime.fromisoformat(d["created_at"])
+                        if d.get("created_at")
+                        else datetime.now(timezone.utc)
+                    ),
+                    args=tuple(json.loads(d["args_json"]))
+                    if d.get("args_json")
+                    else (),
+                    kwargs=json.loads(d["kwargs_json"]) if d.get("kwargs_json") else {},
+                    encrypted_payload=enc.encode() if enc else None,
+                    queue=d.get("queue") or "default",
+                    priority=d.get("priority"),
+                    idempotency_key=d.get("idempotency_key"),
+                    tags=json.loads(d["tags_json"]) if d.get("tags_json") else {},
+                )
+            )
+        return entries
+
+    def _delete_scheduled_sync(self, run_key: str) -> bool:
+        conn = self._get_conn()
+        with conn:
+            cur = conn.execute(
+                "DELETE FROM task_scheduled_once WHERE run_key = ?", (run_key,)
             )
             return cur.rowcount == 1
 
