@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.12.0
+
+Adds one-off scheduled tasks: run a task once at a timestamp computed at runtime, rather than on a cadence fixed at import time.
+
+### One-off scheduled tasks
+
+- `await task_manager.schedule_once(func, *args, run_at=, run_key=, **kwargs)` schedules a single run at an exact future time. Also accepts `tags`, `priority`, `queue`, and `idempotency_key`.
+- `await task_manager.cancel_scheduled(run_key)` cancels a pending firing. `await task_manager.list_scheduled(before=None)` lists them.
+- Scheduling again with an existing `run_key` replaces the pending entry rather than adding a second one. `run_key` is a separate namespace from `idempotency_key`.
+- Pending firings persist to the backend, survive restarts, and are claimed atomically so exactly one instance fires each one.
+- Requires a backend. `schedule_once()` raises `RuntimeError` if none is configured or the backend does not support one-off schedules.
+- Added `ScheduledOnce` to the public API.
+
+### Backends
+
+- Added optional `save_scheduled`, `load_due`, `delete_scheduled`, and `claim_scheduled` to `SnapshotBackend`, plus a `supports_scheduled_once` flag. Implemented on all four built-in backends.
+- New `task_scheduled_once` table on the SQL backends, sorted set on Redis. Created automatically on first connection. No manual migration.
+
+### Scheduler
+
+- One-off entries are held in a horizon window instead of all being loaded at once. Tunable via `horizon` and `refill_interval` on `PeriodicScheduler`, defaulting to 300s and 150s.
+- `ScheduledEntry` gained `once` and `cancelled` fields and a `recurring` property. `compute_next()` raises `ValueError` on a one-off entry.
+
+### Dashboard
+
+- One-off entries are not listed individually in the Schedules tab, which now reports an armed count. Fired one-offs appear in the task list as normal with `source="scheduled"`.
+
+### Upgrade notes
+
+- Upgrading from 0.11.0 requires no action. Schema changes are additive.
+- Downgrading past 0.12.0 leaves pending entries in `task_scheduled_once` unfired, with no error.
+
+---
+
 ## v0.11.0
 
 - Timestamps (`created_at`, `start_time`, `end_time`, audit log, task logs) are now always serialized with an explicit UTC offset. The dashboard displays and filters times in the viewer's local timezone instead of misreading them as local time.

@@ -83,6 +83,7 @@ nav:
     - Priority Queues: guide/priority-queues.md
     - Eager Dispatch: guide/eager-dispatch.md
     - Scheduled Tasks: guide/scheduled-tasks.md
+    - One-Off Scheduled Tasks: guide/one-off-tasks.md
     - Persistence: guide/persistence.md
     - Pending Requeue: guide/requeue.md
     - Custom Backends: guide/backends.md

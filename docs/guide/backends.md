@@ -72,14 +72,53 @@ Two additional methods have sensible defaults that you can override for better p
 !!! tip
     See the [API reference](../api/task-admin.md) for the full method signatures, including `claim_pending` and `acquire_schedule_lock`, which are relevant for multi-instance deployments.
 
+## Supporting one-off schedules
+
+[One-off scheduled tasks](one-off-tasks.md) need four more methods. They are optional: a backend that does not implement them simply cannot be used with `schedule_once()`, and the error surfaces at the call site rather than silently dropping the firing.
+
+To opt in, set `supports_scheduled_once = True` and implement all four:
+
+```python
+from fastapi_taskflow.models import ScheduledOnce
+
+
+class MyBackend(SnapshotBackend):
+    supports_scheduled_once = True
+
+    async def save_scheduled(self, entry: ScheduledOnce) -> None:
+        # Upsert on entry.run_key. Scheduling again with an existing key must
+        # replace the entry, not create a second firing.
+        ...
+
+    async def load_due(self, before: datetime) -> list[ScheduledOnce]:
+        # Return pending entries with fire_at at or before `before`.
+        # Index fire_at: this runs on every refill tick.
+        ...
+
+    async def delete_scheduled(self, run_key: str) -> bool:
+        # Remove the entry. Returns True if one was removed.
+        ...
+
+    async def claim_scheduled(self, run_key: str) -> bool:
+        # Atomically remove the entry and report whether THIS caller removed
+        # it. Must be a single atomic operation, since it is what guarantees
+        # exactly one instance fires the task.
+        ...
+```
+
+`claim_scheduled` is the important one. In every built-in backend it is a single delete that reports whether it removed a row, which is what makes the firing exactly-once across instances. Implementing it as a read followed by a separate delete opens a window where two instances both see the entry and both fire it.
+
+Deleting a `run_key` that does not exist is not an error. Both `delete_scheduled` and `claim_scheduled` return `False` in that case.
+
 ## Storage separation
 
-The ABC deliberately separates two concerns:
+The ABC deliberately separates three concerns:
 
 - **History** (`save` / `load`): completed tasks kept for observability and the dashboard.
 - **Requeue** (`save_pending` / `load_pending` / `clear_pending`): unfinished tasks saved at shutdown for re-execution on the next startup.
+- **One-off schedules** (`save_scheduled` / `load_due` / `delete_scheduled` / `claim_scheduled`): firings scheduled for a future time, which have not run yet and may never run if cancelled.
 
-Keep these in separate tables or key namespaces so they never mix.
+Keep these in separate tables or key namespaces so they never mix. In particular, do not store one-off schedules in the requeue namespace: requeue is loaded and dispatched immediately on startup, which would fire every pending schedule at once.
 
 ## Built-in backends
 

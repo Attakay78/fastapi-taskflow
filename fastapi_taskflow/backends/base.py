@@ -3,19 +3,73 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
-from typing import TYPE_CHECKING
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ..models import TaskRecord
+    from ..models import ScheduledOnce, TaskRecord
+
+
+#: Column order used by the ``task_scheduled_once`` SELECT in every SQL
+#: backend. Kept beside :func:`row_to_scheduled` so the two cannot drift.
+SCHEDULED_COLUMNS = (
+    "run_key, func_name, fire_at, created_at, args_json, kwargs_json, "
+    "encrypted_payload, queue, priority, idempotency_key, tags_json"
+)
+
+
+def row_to_scheduled(row: "Sequence[Any]") -> "ScheduledOnce":
+    """Build a :class:`~fastapi_taskflow.models.ScheduledOnce` from a DB row.
+
+    Expects the columns in :data:`SCHEDULED_COLUMNS` order. Shared by the
+    Postgres and MySQL backends, which both return positional tuples.
+    """
+    from ..models import ScheduledOnce
+
+    (
+        run_key,
+        func_name,
+        fire_at,
+        created_at,
+        args_json,
+        kwargs_json,
+        encrypted_payload,
+        queue,
+        priority,
+        idempotency_key,
+        tags_json,
+    ) = row
+    return ScheduledOnce(
+        run_key=run_key,
+        func_name=func_name,
+        fire_at=datetime.fromisoformat(fire_at),
+        created_at=(
+            datetime.fromisoformat(created_at)
+            if created_at
+            else datetime.now(timezone.utc)
+        ),
+        args=tuple(json.loads(args_json)) if args_json else (),
+        kwargs=json.loads(kwargs_json) if kwargs_json else {},
+        encrypted_payload=(
+            encrypted_payload.encode()
+            if isinstance(encrypted_payload, str)
+            else encrypted_payload
+        ),
+        queue=queue or "default",
+        priority=priority,
+        idempotency_key=idempotency_key,
+        tags=json.loads(tags_json) if tags_json else {},
+    )
 
 
 class SnapshotBackend(ABC):
     """Contract that every snapshot backend must implement.
 
-    Backends handle two separate storage concerns:
+    Backends handle three separate storage concerns:
 
     * **History** (``save`` / ``load``) -- completed tasks kept for
       observability and the dashboard. Written periodically by the scheduler
@@ -24,10 +78,21 @@ class SnapshotBackend(ABC):
       tasks that had not finished when the app shut down. Stored separately
       so they can be re-dispatched on the next startup without polluting the
       history log.
+    * **One-off schedules** (``save_scheduled`` / ``load_due`` /
+      ``delete_scheduled`` / ``claim_scheduled``) -- tasks scheduled to fire
+      once at an exact future time via
+      :meth:`~fastapi_taskflow.manager.TaskManager.schedule_once`. Optional:
+      set :attr:`supports_scheduled_once` to ``True`` and override the four
+      methods to enable the feature on a custom backend.
 
     Implementations manage their own connections. ``close()`` is called by
     :class:`~fastapi_taskflow.snapshot.SnapshotScheduler` on shutdown.
     """
+
+    #: Whether this backend implements the one-off schedule methods below.
+    #: ``TaskManager.schedule_once`` raises at the call site when this is
+    #: ``False``, rather than silently dropping the scheduled firing.
+    supports_scheduled_once: bool = False
 
     @abstractmethod
     async def save(self, records: "list[TaskRecord]") -> int:
@@ -212,6 +277,77 @@ class SnapshotBackend(ABC):
         """
         return None
 
+    # ------------------------------------------------------------------
+    # One-off schedules
+    # ------------------------------------------------------------------
+
+    async def save_scheduled(self, entry: "ScheduledOnce") -> None:
+        """Persist a one-off scheduled firing, replacing any entry with the
+        same ``run_key``.
+
+        Must upsert on ``run_key`` so that rescheduling (the deadline moved)
+        updates ``fire_at`` in place rather than creating a second firing.
+
+        The default raises :class:`NotImplementedError`. Override together
+        with :attr:`supports_scheduled_once`.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support one-off schedules. "
+            "Set supports_scheduled_once = True and implement save_scheduled, "
+            "load_due, delete_scheduled and claim_scheduled."
+        )
+
+    async def load_due(self, before: datetime) -> "list[ScheduledOnce]":
+        """Return pending one-off entries with ``fire_at`` at or before *before*.
+
+        Called on a refill tick by
+        :class:`~fastapi_taskflow.periodic.PeriodicScheduler` to pull the next
+        horizon window of entries into memory. Implementations should index
+        ``fire_at`` so this stays cheap as the pending set grows.
+
+        Args:
+            before: Upper bound (inclusive) on ``fire_at``.
+
+        Returns:
+            Matching entries. Order is not significant — the caller heapifies.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support one-off schedules."
+        )
+
+    async def delete_scheduled(self, run_key: str) -> bool:
+        """Remove the pending one-off entry with *run_key*.
+
+        Used by ``cancel_scheduled``. Deleting a ``run_key`` that is not
+        present is not an error.
+
+        Returns:
+            ``True`` if an entry was removed, ``False`` if none existed.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support one-off schedules."
+        )
+
+    async def claim_scheduled(self, run_key: str) -> bool:
+        """Atomically claim a one-off entry for firing, removing it.
+
+        This is the exactly-once primitive for one-off firings, mirroring
+        :meth:`claim_pending`. It must be a single atomic delete that reports
+        whether *this* caller was the one that removed the row, so that in a
+        multi-instance deployment exactly one instance fires the task.
+
+        Note this is deliberately not :meth:`acquire_schedule_lock`, which is
+        TTL-based and therefore only at-most-once-per-TTL — and which has no
+        sensible TTL to derive for a firing that happens exactly once.
+
+        Returns:
+            ``True`` if this caller claimed the entry and should fire it.
+            ``False`` if another instance already claimed it.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support one-off schedules."
+        )
+
     @abstractmethod
     async def close(self) -> None:
         """Release any held resources (connections, file handles, etc.)."""
@@ -274,6 +410,18 @@ class ThreadedSnapshotBackend(SnapshotBackend):
     @abstractmethod
     def _acquire_schedule_lock_sync(self, key: str, ttl: int) -> bool: ...
 
+    # One-off schedule methods are not abstract: a threaded backend that
+    # leaves supports_scheduled_once False never has them called.
+
+    def _save_scheduled_sync(self, entry: "ScheduledOnce") -> None:
+        raise NotImplementedError
+
+    def _load_due_sync(self, before: str) -> "list[ScheduledOnce]":
+        raise NotImplementedError
+
+    def _delete_scheduled_sync(self, run_key: str) -> bool:
+        raise NotImplementedError
+
     # ------------------------------------------------------------------
     # Async interface — single implementation for all threaded backends
     # ------------------------------------------------------------------
@@ -317,3 +465,17 @@ class ThreadedSnapshotBackend(SnapshotBackend):
 
     async def acquire_schedule_lock(self, key: str, ttl: int) -> bool:
         return await self._run(self._acquire_schedule_lock_sync, key, ttl)
+
+    async def save_scheduled(self, entry: "ScheduledOnce") -> None:
+        await self._run(self._save_scheduled_sync, entry)
+
+    async def load_due(self, before: datetime) -> "list[ScheduledOnce]":
+        return await self._run(self._load_due_sync, before.isoformat())
+
+    async def delete_scheduled(self, run_key: str) -> bool:
+        return await self._run(self._delete_scheduled_sync, run_key)
+
+    async def claim_scheduled(self, run_key: str) -> bool:
+        # For SQL backends the delete *is* the claim: it is a single atomic
+        # statement and rowcount tells us whether this caller won the race.
+        return await self._run(self._delete_scheduled_sync, run_key)

@@ -15,6 +15,7 @@ def _build_sse_state(
     include_args: bool = False,
     schedules: list | None = None,
     queues: list | None = None,
+    schedule_summary: dict | None = None,
 ) -> str:
     """
     Serialize the full task store as a single SSE ``state`` event.
@@ -69,6 +70,7 @@ def _build_sse_state(
             "tasks": task_dicts,
             "metrics": metrics,
             "schedules": schedules or [],
+            "schedule_summary": schedule_summary or {"one_off_armed": 0},
             "queues": queues or [],
         }
     )
@@ -81,6 +83,12 @@ def _get_schedule_entries(task_manager: "TaskManager") -> list[dict]:
     Returns a list of dicts with ``func_name``, ``trigger``, ``next_run``,
     and ``last_status`` (the status of the most recent task record for this
     function, or ``None`` if no run has been recorded yet).
+
+    Only *recurring* entries are listed. One-off entries scheduled via
+    ``schedule_once()`` are excluded by construction — ``ps.entries`` never
+    contains them — because that set is unbounded (one per open deadline in
+    the calling application) and this runs per connected client on every SSE
+    tick. Their count is reported separately by :func:`_get_schedule_summary`.
     """
     ps = task_manager._periodic_scheduler
     if ps is None:
@@ -110,6 +118,19 @@ def _get_schedule_entries(task_manager: "TaskManager") -> list[dict]:
         }
         for entry in ps.entries
     ]
+
+
+def _get_schedule_summary(task_manager: "TaskManager") -> dict:
+    """Aggregate counts for schedule types not enumerated individually.
+
+    ``one_off_armed`` is how many one-off entries are loaded in the current
+    horizon window on this instance, not the total pending in the backend —
+    counting the latter would mean a backend query per SSE tick.
+    """
+    ps = task_manager._periodic_scheduler
+    if ps is None:
+        return {"one_off_armed": 0}
+    return {"one_off_armed": ps.pending_one_off_count}
 
 
 async def _sse_generator(
@@ -143,6 +164,7 @@ async def _sse_generator(
             tasks,
             include_args=include_args,
             schedules=_get_schedule_entries(task_manager),
+            schedule_summary=_get_schedule_summary(task_manager),
             queues=task_manager.queue_stats(),
         )
 
@@ -161,6 +183,7 @@ async def _sse_generator(
                     tasks,
                     include_args=include_args,
                     schedules=_get_schedule_entries(task_manager),
+                    schedule_summary=_get_schedule_summary(task_manager),
                     queues=task_manager.queue_stats(),
                 )
             except asyncio.TimeoutError:
@@ -172,6 +195,7 @@ async def _sse_generator(
                         tasks,
                         include_args=include_args,
                         schedules=_get_schedule_entries(task_manager),
+                        schedule_summary=_get_schedule_summary(task_manager),
                         queues=task_manager.queue_stats(),
                     )
     except asyncio.CancelledError:

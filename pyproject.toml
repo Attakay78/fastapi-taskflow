@@ -1,6 +1,6 @@
 [project]
 name = "fastapi-taskflow"
-version = "0.11.0"
+version = "0.12.0"
 description = "Retries, persistence, and visibility for FastAPI's BackgroundTasks. Production-grade background tasks. No workers, no brokers, drop-in."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -59,8 +59,8 @@ docs = [
     "pymdown-extensions>=10.0",
 ]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "cloudpickle>=3.0",
     "croniter>=1.4",
     "cryptography>=41.0",
@@ -70,7 +70,7 @@ dev-dependencies = [
     "pymdown-extensions>=10.0",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
-    "ruff>=0.15.9",
+    "ruff>=0.15.9,<0.16",
 ]
 
 [project.urls]
