@@ -20,7 +20,7 @@ jobs:
       - uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies
-        run: uv pip install --system -e ".[redis,dev]" ruff mypy
+        run: uv pip install --system -e ".[redis,encryption,scheduler,dev]" "ruff>=0.15.9,<0.16" mypy
 
       - name: Lint
         run: |

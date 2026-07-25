@@ -23,8 +23,8 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
-from .base import ThreadedSnapshotBackend
-from ..models import TaskRecord, TaskStatus
+from .base import SCHEDULED_COLUMNS, ThreadedSnapshotBackend, row_to_scheduled
+from ..models import ScheduledOnce, TaskRecord, TaskStatus
 
 
 _CREATE_HISTORY = """
@@ -78,12 +78,50 @@ CREATE TABLE IF NOT EXISTS task_schedule_locks (
 )
 """
 
+# One-off tasks scheduled to fire at an exact future time. Keyed by the
+# caller-supplied run_key so rescheduling replaces in place. fire_at is
+# indexed because the scheduler queries it every refill tick.
+_CREATE_SCHEDULED = """
+CREATE TABLE IF NOT EXISTS task_scheduled_once (
+    run_key           VARCHAR(191) NOT NULL PRIMARY KEY,
+    func_name         TEXT         NOT NULL,
+    fire_at           VARCHAR(64)  NOT NULL,
+    created_at        TEXT,
+    args_json         TEXT,
+    kwargs_json       TEXT,
+    encrypted_payload TEXT,
+    queue             VARCHAR(128) DEFAULT 'default',
+    priority          INT,
+    idempotency_key   VARCHAR(191),
+    tags_json         TEXT
+)
+"""
+
 _INDEXES = [
     "CREATE INDEX idx_snap_status ON task_snapshots(status)",
     "CREATE INDEX idx_snap_end_status ON task_snapshots(end_time(32), status)",
     "CREATE INDEX idx_snap_snapshotted ON task_snapshots(snapshotted_at(32))",
     "CREATE INDEX idx_snap_func_name ON task_snapshots(func_name(191))",
+    "CREATE INDEX idx_sched_fire_at ON task_scheduled_once(fire_at)",
 ]
+
+_UPSERT_SCHEDULED = """
+INSERT INTO task_scheduled_once
+    (run_key, func_name, fire_at, created_at, args_json, kwargs_json,
+     encrypted_payload, queue, priority, idempotency_key, tags_json)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+ON DUPLICATE KEY UPDATE
+    func_name         = VALUES(func_name),
+    fire_at           = VALUES(fire_at),
+    created_at        = VALUES(created_at),
+    args_json         = VALUES(args_json),
+    kwargs_json       = VALUES(kwargs_json),
+    encrypted_payload = VALUES(encrypted_payload),
+    queue             = VALUES(queue),
+    priority          = VALUES(priority),
+    idempotency_key   = VALUES(idempotency_key),
+    tags_json         = VALUES(tags_json)
+"""
 
 _UPSERT_HISTORY = """
 INSERT INTO task_snapshots
@@ -167,6 +205,8 @@ class MySQLBackend(ThreadedSnapshotBackend):
             ),
         )
     """
+
+    supports_scheduled_once = True
 
     def __init__(self, url: str, *, max_workers: int = 4) -> None:
         super().__init__(max_workers=max_workers, thread_name_prefix="taskflow-mysql")
@@ -257,6 +297,7 @@ class MySQLBackend(ThreadedSnapshotBackend):
                 cur.execute(_CREATE_PENDING)
                 cur.execute(_CREATE_IDEMPOTENCY)
                 cur.execute(_CREATE_SCHEDULE_LOCKS)
+                cur.execute(_CREATE_SCHEDULED)
                 for migration in _migrations:
                     try:
                         cur.execute(migration)
@@ -345,6 +386,53 @@ class MySQLBackend(ThreadedSnapshotBackend):
                 cur.execute(
                     "DELETE FROM task_pending_requeue WHERE task_id = %s",
                     (task_id,),
+                )
+                deleted = cur.rowcount
+        return deleted == 1
+
+    # ------------------------------------------------------------------
+    # One-off schedules
+    # ------------------------------------------------------------------
+
+    def _save_scheduled_sync(self, entry: ScheduledOnce) -> None:
+        with self._transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    _UPSERT_SCHEDULED,
+                    (
+                        entry.run_key,
+                        entry.func_name,
+                        entry.fire_at.isoformat(),
+                        entry.created_at.isoformat(),
+                        json.dumps(list(entry.args), default=repr),
+                        json.dumps(entry.kwargs, default=repr),
+                        entry.encrypted_payload.decode()
+                        if entry.encrypted_payload
+                        else None,
+                        entry.queue,
+                        entry.priority,
+                        entry.idempotency_key,
+                        json.dumps(entry.tags) if entry.tags else None,
+                    ),
+                )
+
+    def _load_due_sync(self, before: str) -> list[ScheduledOnce]:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {SCHEDULED_COLUMNS} FROM task_scheduled_once "
+                    "WHERE fire_at <= %s ORDER BY fire_at",
+                    (before,),
+                )
+                rows = cur.fetchall()
+        return [row_to_scheduled(r) for r in rows]
+
+    def _delete_scheduled_sync(self, run_key: str) -> bool:
+        with self._transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM task_scheduled_once WHERE run_key = %s",
+                    (run_key,),
                 )
                 deleted = cur.rowcount
         return deleted == 1

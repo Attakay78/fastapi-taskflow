@@ -98,6 +98,7 @@ The route signature does not change. Tasks that fail are retried. If the server 
 - Priority queues: `priority=` on `@task_manager.task()` or `add_task()`, higher-priority tasks run first, equal-priority tasks are FIFO
 - Eager dispatch: `eager=True` starts a task immediately via `asyncio.create_task` before the HTTP response is sent
 - Scheduled tasks: `@task_manager.schedule(every=)` and `cron=` with distributed lock for multi-instance
+- One-off scheduled tasks: `schedule_once(run_at=, run_key=)` runs a task once at a runtime-computed time, persisted across restarts, reschedulable and cancellable by key
 - Zero-migration injection: keep your existing `BackgroundTasks` annotations
 - Both sync and async task functions supported
 
@@ -429,6 +430,64 @@ async def morning_report() -> None:
 Cron expressions require `pip install "fastapi-taskflow[scheduler]"`. Interval-based schedules have no extra dependencies. Cron expressions default to UTC. Pass any IANA timezone name with `timezone=` to evaluate in local time.
 
 In multi-instance deployments, a distributed lock ensures only one instance fires each scheduled entry per interval.
+
+## One-off scheduled tasks
+
+`@task_manager.schedule()` fixes a cadence at import time. When the run time is only known at runtime and computed from your own data, use `schedule_once()` instead. It runs a single invocation at an exact future timestamp.
+
+```python
+from datetime import datetime, timedelta, timezone
+
+task_manager = TaskManager(snapshot_db="tasks.db")
+
+
+@task_manager.task()
+async def settle_auction(listing_id: str) -> None:
+    ...
+
+
+@app.post("/listings/{listing_id}/close-at")
+async def set_close_time(listing_id: str, closes_at: datetime):
+    await task_manager.schedule_once(
+        settle_auction,
+        listing_id,
+        run_at=closes_at,
+        run_key=f"auction-close:{listing_id}",
+    )
+    return {"scheduled": True}
+```
+
+`run_key` is the identity of the pending firing. Calling `schedule_once()` again with the same key replaces the entry rather than creating a second one, which is how you move a deadline:
+
+```python
+# The close time moved. This replaces the pending firing, it does not add one.
+await task_manager.schedule_once(
+    settle_auction, listing_id,
+    run_at=new_closes_at,
+    run_key=f"auction-close:{listing_id}",
+)
+
+# No longer needed.
+await task_manager.cancel_scheduled(f"auction-close:{listing_id}")
+
+# Inspect what is still pending.
+pending = await task_manager.list_scheduled()
+```
+
+Pending firings are written to the configured backend, so they survive a restart and are re-armed automatically on the next startup. When a firing comes due, exactly one instance claims it with an atomic delete, so a multi-instance deployment runs it once and only once.
+
+`run_key` is a separate namespace from `idempotency_key`. `run_key` identifies a pending schedule and is meant to be replaced or cancelled. `idempotency_key` guards against duplicate execution and is permanent once recorded. You can pass both:
+
+```python
+await task_manager.schedule_once(
+    settle_auction, listing_id,
+    run_at=closes_at,
+    run_key=f"auction-close:{listing_id}",
+    idempotency_key=f"settled:{listing_id}",
+)
+```
+
+A backend is required, since the whole point is that the firing outlives the process. `SqliteBackend`, `PostgresBackend`, `MySQLBackend`, and `RedisBackend` all support it. Calling `schedule_once()` without a backend, or with a custom backend that does not implement the storage methods, raises `RuntimeError` at the call site rather than dropping the task silently.
 
 ## Custom dashboard title
 

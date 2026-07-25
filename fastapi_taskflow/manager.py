@@ -5,9 +5,15 @@ import collections
 import concurrent.futures
 import concurrent.futures.thread as _cft
 import inspect
+import pickle
 import threading
 import time
 import weakref
+from datetime import datetime, timedelta
+
+# Aliased: TaskManager.schedule() takes a `timezone` parameter that would
+# otherwise shadow the module in that scope.
+from datetime import timezone as _dt_timezone
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, cast
 
 import heapq
@@ -19,7 +25,7 @@ from .executors.process_executor import LazyProcessExecutor
 from .executors.thread_executor import ThreadExecutor
 from .loggers.chain import LoggerChain
 from .loggers.file import FileLogger
-from .models import QueueConfig, TaskConfig
+from .models import QueueConfig, ScheduledOnce, TaskConfig
 from .registry import TaskRegistry
 from .store import TaskStore
 
@@ -1325,6 +1331,180 @@ class TaskManager:
             return func
 
         return decorator
+
+    # ------------------------------------------------------------------
+    # One-off schedules
+    # ------------------------------------------------------------------
+
+    def _require_scheduled_once(self) -> "SnapshotBackend":
+        """Return the backend, or explain why one-off scheduling is unavailable."""
+        backend = self._scheduler._backend if self._scheduler is not None else None
+        if backend is None:
+            raise RuntimeError(
+                "schedule_once() requires a snapshot backend so the pending "
+                "firing survives a restart. Configure one with "
+                "TaskManager(snapshot_db='tasks.db') or snapshot_backend=..."
+            )
+        if not backend.supports_scheduled_once:
+            raise RuntimeError(
+                f"{type(backend).__name__} does not support one-off schedules. "
+                "Use SqliteBackend, PostgresBackend, MySQLBackend or RedisBackend, "
+                "or implement the scheduled-once methods on your custom backend."
+            )
+        return backend
+
+    async def schedule_once(
+        self,
+        func: Callable,
+        *args: Any,
+        run_at: "datetime",
+        run_key: str,
+        idempotency_key: Optional[str] = None,
+        tags: Optional[dict[str, str]] = None,
+        priority: Optional[int] = None,
+        queue: Optional[str] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Schedule *func* to run exactly once at *run_at*.
+
+        Unlike ``@schedule(every=...)``, which fixes a cadence at decoration
+        time, this schedules a single invocation at a timestamp computed at
+        runtime — the shape you need for "act on this record when its deadline
+        passes". The firing is persisted to the snapshot backend, so it
+        survives a restart, and claimed atomically when it fires, so exactly
+        one instance runs it in a multi-instance deployment.
+
+        Args:
+            func: The task function to run. Must be registered with
+                ``@task_manager.task()`` or ``@task_manager.schedule()`` so it
+                can be resolved by name when the entry fires — possibly in a
+                different process than the one that scheduled it.
+            *args: Positional arguments forwarded to *func*.
+            run_at: When to run. Naive datetimes are treated as UTC. A time in
+                the past fires on the next scheduler tick.
+            run_key: Identity of this pending firing. Calling ``schedule_once``
+                again with the same ``run_key`` **replaces** the pending entry
+                (this is how you move a deadline); :meth:`cancel_scheduled`
+                removes it. This is a separate namespace from
+                *idempotency_key*.
+            idempotency_key: Optional deduplication key forwarded onto the
+                task record when the entry fires. Guards duplicate
+                *execution*, independent of ``run_key``, which identifies the
+                pending *schedule*.
+            tags: Key/value labels attached to the task when it fires.
+            priority: Execution priority for the firing.
+            queue: Named queue to route the firing into.
+            **kwargs: Keyword arguments forwarded to *func*.
+
+        Raises:
+            RuntimeError: If no snapshot backend is configured, or the
+                configured backend does not support one-off schedules.
+            TaskArgumentError: If *func* uses ``executor='process'`` and any
+                argument is not picklable.
+
+        Example::
+
+            await task_manager.schedule_once(
+                settle_auction,
+                listing_id,
+                run_at=closes_at,
+                run_key=f"auction-close:{listing_id}",
+            )
+        """
+        backend = self._require_scheduled_once()
+
+        if run_at.tzinfo is None:
+            run_at = run_at.replace(tzinfo=_dt_timezone.utc)
+
+        config = self.registry.get_config(func) or TaskConfig()
+        executor_obj = self._resolve_executor(func, config)
+        # Fail at the call site rather than when the entry fires, possibly
+        # days later in a different process.
+        executor_obj.validate_args(args, kwargs)
+
+        if self.fernet is not None:
+            encrypted_payload = self.fernet.encrypt(pickle.dumps((args, kwargs)))
+            store_args: tuple = ()
+            store_kwargs: dict = {}
+        else:
+            encrypted_payload = None
+            store_args = args
+            store_kwargs = kwargs
+
+        entry = ScheduledOnce(
+            run_key=run_key,
+            func_name=func.__name__,
+            fire_at=run_at,
+            args=store_args,
+            kwargs=store_kwargs,
+            encrypted_payload=encrypted_payload,
+            queue=queue or config.queue or "default",
+            priority=priority if priority is not None else config.priority,
+            idempotency_key=idempotency_key,
+            tags=tags or {},
+        )
+
+        # Backend first: it is the source of truth. If the process dies here,
+        # a later refill still picks the entry up.
+        await backend.save_scheduled(entry)
+
+        # Arm in memory only when the entry falls inside the current horizon;
+        # anything further out is left for a refill so the heap stays bounded.
+        scheduler = self._periodic_scheduler
+        if scheduler is not None and scheduler._supports_one_off:
+            horizon_end = datetime.now(_dt_timezone.utc) + timedelta(
+                seconds=scheduler._horizon
+            )
+            if run_at <= horizon_end:
+                scheduler.add_one_off(entry)
+            else:
+                # A previously-armed entry may have just been pushed beyond
+                # the horizon; drop the stale in-memory copy.
+                scheduler.cancel_one_off(run_key)
+
+    async def cancel_scheduled(self, run_key: str) -> bool:
+        """Cancel the pending one-off firing identified by *run_key*.
+
+        Removes the entry from the backend first so that a cancel racing a
+        restart cannot re-arm the cancelled task, then clears the in-memory
+        copy if this instance had it armed.
+
+        Args:
+            run_key: The key passed to :meth:`schedule_once`.
+
+        Returns:
+            ``True`` if a pending entry was removed, ``False`` if no entry
+            with that key existed (already fired, already cancelled, or never
+            scheduled).
+
+        Raises:
+            RuntimeError: If no snapshot backend is configured, or the
+                configured backend does not support one-off schedules.
+        """
+        backend = self._require_scheduled_once()
+        removed = await backend.delete_scheduled(run_key)
+        if self._periodic_scheduler is not None:
+            self._periodic_scheduler.cancel_one_off(run_key)
+        return removed
+
+    async def list_scheduled(
+        self, before: "Optional[datetime]" = None
+    ) -> "list[ScheduledOnce]":
+        """Return pending one-off entries due at or before *before*.
+
+        Args:
+            before: Upper bound on ``fire_at``. Defaults to one year out,
+                which in practice returns everything pending. Pass a nearer
+                bound when the pending set is large.
+
+        Raises:
+            RuntimeError: If no snapshot backend is configured, or the
+                configured backend does not support one-off schedules.
+        """
+        backend = self._require_scheduled_once()
+        if before is None:
+            before = datetime.now(_dt_timezone.utc) + timedelta(days=365)
+        return await backend.load_due(before)
 
     # ------------------------------------------------------------------
     # FastAPI dependency
