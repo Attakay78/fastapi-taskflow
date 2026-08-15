@@ -619,6 +619,8 @@ DASHBOARD_JS = r"""
 
     // ── Build header tabs ────────────────────────────────────────
     const tabsEl = document.getElementById('detail-tabs');
+    var prevActiveBtn = tabsEl.querySelector('.panel-tab--active');
+    var activePanelId = prevActiveBtn ? prevActiveBtn.dataset.panel : 'panel-details';
     tabsEl.innerHTML = '';
 
     function makeTab(label, panelId, extraClass) {
@@ -631,9 +633,17 @@ DASHBOARD_JS = r"""
       return btn;
     }
 
-    makeTab('Details', 'panel-details').classList.add('panel-tab--active');
-    if (hasLogs)  makeTab('Logs (' + task.logs.length + ')', 'panel-logs');
-    if (hasError) makeTab('Error', 'panel-error', 'panel-tab--error');
+    var detailsBtn = makeTab('Details', 'panel-details');
+    var logsBtn  = hasLogs  ? makeTab('Logs (' + task.logs.length + ')', 'panel-logs') : null;
+    var errorBtn = hasError ? makeTab('Error', 'panel-error', 'panel-tab--error') : null;
+
+    // Keep whichever tab was active before this re-render (e.g. a live SSE
+    // update refreshing the open task) instead of always snapping back to
+    // Details.
+    var tabButtons = { 'panel-details': detailsBtn, 'panel-logs': logsBtn, 'panel-error': errorBtn };
+    var activeBtn = tabButtons[activePanelId] || detailsBtn;
+    activeBtn.classList.add('panel-tab--active');
+    activePanelId = activeBtn.dataset.panel;
 
     // ── Details panel ────────────────────────────────────────────
     var detailsHtml =
@@ -776,10 +786,11 @@ DASHBOARD_JS = r"""
       : '';
 
     // ── Render all three panels into detail-content ──────────────
+    function panelCls(id) { return 'd-tab-panel' + (id === activePanelId ? ' d-tab-panel--active' : ''); }
     document.getElementById('detail-content').innerHTML =
-        '<div id="panel-details" class="d-tab-panel d-tab-panel--active">' + detailsHtml + '</div>'
-      + (hasLogs  ? '<div id="panel-logs"  class="d-tab-panel">' + logsHtml  + '</div>' : '')
-      + (hasError ? '<div id="panel-error" class="d-tab-panel">' + errorHtml + '</div>' : '');
+        '<div id="panel-details" class="' + panelCls('panel-details') + '">' + detailsHtml + '</div>'
+      + (hasLogs  ? '<div id="panel-logs"  class="' + panelCls('panel-logs')  + '">' + logsHtml  + '</div>' : '')
+      + (hasError ? '<div id="panel-error" class="' + panelCls('panel-error') + '">' + errorHtml + '</div>' : '');
   }
 
   function switchTab(btn) {
