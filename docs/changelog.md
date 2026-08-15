@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.12.1
+
+- Dashboard layout is now responsive on small screens: header, metrics, filters, table, and detail panel adapt instead of overflowing.
+
+---
+
 ## v0.12.0
 
 Adds one-off scheduled tasks: run a task once at a timestamp computed at runtime, rather than on a cadence fixed at import time.

@@ -1,6 +1,6 @@
 [project]
 name = "fastapi-taskflow"
-version = "0.12.0"
+version = "0.12.1"
 description = "Retries, persistence, and visibility for FastAPI's BackgroundTasks. Production-grade background tasks. No workers, no brokers, drop-in."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -35,7 +35,7 @@ scheduler = [
     "croniter>=1.4",
 ]
 encryption = [
-    "cryptography>=41.0",
+    "cryptography>=50.0",
 ]
 process = [
     "cloudpickle>=3.0",
@@ -45,7 +45,7 @@ all = [
     "psycopg2-binary>=2.9",
     "PyMySQL>=1.1",
     "croniter>=1.4",
-    "cryptography>=41.0",
+    "cryptography>=50.0",
     "cloudpickle>=3.0",
 ]
 dev = [
@@ -63,7 +63,7 @@ docs = [
 dev = [
     "cloudpickle>=3.0",
     "croniter>=1.4",
-    "cryptography>=41.0",
+    "cryptography>=50.0",
     "httpx>=0.28.1",
     "mkdocs-material>=9.5",
     "mypy>=1.20.0",
